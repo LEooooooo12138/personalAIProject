@@ -10,3 +10,11 @@ go-agent/tools/*.exe
 .idea/
 .vscode/
 *.swp
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Wiki pages (source and distilled, not engineering)
+wiki-pages/

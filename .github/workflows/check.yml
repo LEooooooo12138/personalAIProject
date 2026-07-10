@@ -1,0 +1,21 @@
+﻿name: Check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Go vet
+        run: cd go-agent && go vet ./...
+
+      - name: Go test
+        run: cd go-agent && go test ./...
+
+      - name: Go build (linux)
+        run: cd go-agent && GOOS=linux GOARCH=amd64 go build -o agentd ./cmd/agentd
