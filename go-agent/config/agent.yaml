@@ -1,0 +1,47 @@
+server:
+  port: 8080
+  internal_key: "my_local_api_key"
+
+inference:
+  endpoint: "http://localhost:11434"
+  models:
+    local: "gemma4:12b"
+    vision: "llava:7b"
+    embedding: "bge-m3"
+  timeout: 300s
+
+vaults:
+  personal: "D:\\vaults\\personal"
+  agent: "D:\\vaults\\agent"
+
+session:
+  max_rounds: 20
+  idle_timeout: 30m
+  scan_interval: 1m
+  max_sessions: 100
+
+memory:
+  dedup_threshold: 0.45
+  min_messages: 3
+
+personality:
+  enabled: false
+  name: ""
+  tone: "neutral"
+  system_prompt: ""
+
+channels:
+  wecom:
+    enabled: true
+    listen_addr: ":8081"
+    corp_id: ww728946bad5950088
+    corp_secret: dZEqE35ZRf51Ng7QBCwqxc39C8qx0hcUgvWIXqmieQ0
+    agent_id: 1000002
+    token: bUKq1BfSZ
+    encoding_aes_key: jmE6HqFOITXFCrjfjjH4xspSd1PCkSmnlvLI1v6YG22
+    allowed_users: [LE,虹が]
+    auto_approve: false
+
+logging:
+  level: "debug"
+  format: "console"

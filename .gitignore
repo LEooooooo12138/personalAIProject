@@ -1,0 +1,12 @@
+﻿# Go build artifacts
+go-agent/agentd.exe
+go-agent/agentd.exe~
+go-agent/.gocache/
+
+# Temp compiled binaries in tools
+go-agent/tools/*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
