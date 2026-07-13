@@ -1,2 +1,5 @@
-# Config with secrets — use env vars instead
+﻿# Config with secrets 鈥?use env vars instead
 config/agent.yaml
+
+# Environment variables (secrets)
+config/.env
