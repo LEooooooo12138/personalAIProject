@@ -3,10 +3,10 @@
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
+	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // ── Chain Executor ──
@@ -53,7 +53,7 @@ func (e *ChainExecutor) Run(ctx context.Context, chainName string, state *ChainS
 
 	e.logger.Info("chain started",
 		zap.String("chain", chain.Name),
-		zap.String("query", truncate(state.Query, 80)),
+		zap.String("query", vault.Truncate(state.Query, 80)),
 	)
 
 	result := e.runChain(ctx, chain, state)
@@ -208,12 +208,4 @@ func (bc *BranchingChain) ToChain(router *ChainRouter) {
 }
 
 // ── Helpers ──
-
-func truncate(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return strings.TrimSpace(string(runes[:maxLen])) + "..."
-}
 

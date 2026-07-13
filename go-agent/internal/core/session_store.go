@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // 鈹€鈹€ Session Store 鈹€鈹€
@@ -231,7 +231,7 @@ func (ss *SessionStore) SearchSessions(ctx context.Context, query string, k int)
 	}
 	var scores []scored
 	for i, sm := range ss.messages {
-		s := cosineSimilarity(queryVec, sm.Embedding)
+		s := vault.CosineSimilarity32(queryVec, sm.Embedding)
 		if s > 0.3 {
 			scores = append(scores, scored{idx: i, score: s})
 		}
@@ -353,7 +353,6 @@ func (ss *SessionStore) buildEmbeddings(ctx context.Context) error {
 	return nil
 }
 
-
 // ── Session List / History API ──
 
 // SessionInfo is a lightweight summary of a session for listing.
@@ -459,19 +458,3 @@ func (ss *SessionStore) GetMessages(channelID, userID string) []Message {
 }
 
 // ── Cosine similarity ──
-
-func cosineSimilarity(a, b []float32) float32 {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0
-	}
-	var dot, magA, magB float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		magA += float64(a[i]) * float64(a[i])
-		magB += float64(b[i]) * float64(b[i])
-	}
-	if magA == 0 || magB == 0 {
-		return 0
-	}
-	return float32(dot / (math.Sqrt(magA) * math.Sqrt(magB)))
-}

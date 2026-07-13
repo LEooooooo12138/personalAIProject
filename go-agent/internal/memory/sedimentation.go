@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // ── 什么是 TF-IDF？ ──
@@ -509,14 +510,14 @@ func tokenize(text string) []string {
 	var current strings.Builder
 
 	for _, r := range text {
-		if isCJK(r) {
+		if vault.IsCJK(r) {
 			// 中文字符：先保存当前英文 token（如果有），再单独作为一个 token
 			if current.Len() > 0 {
 				tokens = append(tokens, current.String())
 				current.Reset()
 			}
 			tokens = append(tokens, string(r))
-		} else if isAlphaNum(r) {
+		} else if vault.IsAlphaNum(r) {
 			current.WriteRune(r)
 		} else {
 			// 空格/标点：保存当前 token
@@ -533,10 +534,10 @@ func tokenize(text string) []string {
 	// 过滤太短的 token 和停用词
 	var filtered []string
 	for _, t := range tokens {
-		if len(t) < 2 && !isCJK([]rune(t)[0]) {
+		if len(t) < 2 && !vault.IsCJK([]rune(t)[0]) {
 			continue
 		}
-		if isStopWord(t) {
+		if vault.IsStopWord(t) {
 			continue
 		}
 		filtered = append(filtered, t)
@@ -597,48 +598,13 @@ func cosineSimilarity(a, b idfVector) float64 {
 
 // ── Helpers ──
 
-func isCJK(r rune) bool {
-	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified
-		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
-		(r >= 0x20000 && r <= 0x2A6DF) // CJK Extension B
-}
-
-func isAlphaNum(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
-}
-
 // isStopWord filters common words that carry little semantic meaning.
-func isStopWord(token string) bool {
-	stop := map[string]bool{
-		"的": true, "了": true, "是": true, "在": true, "我": true,
-		"有": true, "和": true, "就": true, "不": true, "人": true,
-		"都": true, "一": true, "个": true, "上": true, "也": true,
-		"很": true, "到": true, "说": true, "要": true, "去": true,
-		"你": true, "会": true, "着": true, "没有": true, "看": true,
-		"好": true, "自己": true, "这": true, "他": true, "她": true,
-		"它": true, "们": true, "那": true, "些": true, "什么": true,
-		"the": true, "a": true, "an": true, "is": true, "are": true,
-		"was": true, "were": true, "be": true, "been": true, "being": true,
-		"have": true, "has": true, "had": true, "do": true, "does": true,
-		"did": true, "will": true, "would": true, "can": true, "could": true,
-		"should": true, "may": true, "might": true, "shall": true, "must": true,
-		"i": true, "me": true, "my": true, "we": true, "our": true,
-		"you": true, "your": true, "he": true, "him": true, "his": true,
-		"she": true, "her": true, "it": true, "its": true, "they": true,
-		"them": true, "their": true, "this": true, "that": true, "these": true,
-		"those": true, "to": true, "of": true, "in": true, "for": true,
-		"on": true, "with": true, "at": true, "by": true, "from": true,
-		"and": true, "or": true, "not": true, "but": true, "if": true,
-		"so": true, "as": true, "than": true, "too": true, "very": true,
-	}
-	return stop[token]
-}
 
 // slugify converts a title into a filesystem-safe slug.
 func slugify(title string) string {
 	var result strings.Builder
 	for _, r := range strings.ToLower(title) {
-		if isAlphaNum(r) || isCJK(r) {
+		if vault.IsAlphaNum(r) || vault.IsCJK(r) {
 			result.WriteRune(r)
 		} else if r == ' ' || r == '-' {
 			result.WriteRune('-')

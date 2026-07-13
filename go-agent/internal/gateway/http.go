@@ -1,4 +1,4 @@
-package gateway
+﻿package gateway
 
 import (
 	"context"
@@ -24,14 +24,14 @@ import (
 
 type Server struct {
 	sessionMgr    *core.SessionManager
-	embedStore    *EmbeddingStore
+	embedStore    *vault.EmbeddingStore
 	cfg           *core.Config
 	logger        *zap.Logger
 	infer         inference.Client
 	vaultR        vault.Reader
 	vaultW        vault.Writer
 	chMgr         *channel.Manager
-	router        *core.Router
+	router        *core.ModelRouter
 	filterChain   *filter.Chain
 	engine        *gin.Engine
 	srv           *http.Server
@@ -45,13 +45,13 @@ type Server struct {
 	sedimenter  *memory.Sedimenter
 }
 
-func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.Router, filterChain *filter.Chain, sessionMgr *core.SessionManager, embedStore *EmbeddingStore) *Server {
+func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.ModelRouter, filterChain *filter.Chain, sessionMgr *core.SessionManager, embedStore *vault.EmbeddingStore) *Server {
 	if embedStore == nil {
-        embedStore = NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger)
+        embedStore = vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger)
     }
     s := &Server{
 		sessionMgr:  sessionMgr,
-		embedStore: NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger),
+		embedStore: vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger),
 		cfg:         cfg,
 		logger:      logger,
 		infer:       infer,
@@ -66,12 +66,38 @@ func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr 
 }
 
 // NewServerWithChains creates a server with chain support.
-func NewServerWithChains(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.Router, filterChain *filter.Chain, sessionMgr *core.SessionManager, chainExecutor *chain.ChainExecutor, chainRouter *chain.ChainRouter, sessionStore *core.SessionStore, embedStore *EmbeddingStore, sedimenter *memory.Sedimenter) *Server {
+func NewServerWithChains(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.ModelRouter, filterChain *filter.Chain, sessionMgr *core.SessionManager, chainExecutor *chain.ChainExecutor, chainRouter *chain.ChainRouter, sessionStore *core.SessionStore, embedStore *vault.EmbeddingStore, sedimenter *memory.Sedimenter) *Server {
 	s := NewServer(cfg, logger, infer, vr, vw, chMgr, coreRouter, filterChain, sessionMgr, embedStore)
 	s.chainExecutor = chainExecutor
 	s.chainRouter = chainRouter
 	s.sessionStore = sessionStore
 	s.sedimenter = sedimenter
+	return s
+}
+
+
+// NewServerFromApp creates a server from the centralized App container.
+// This is the preferred constructor; older multi-param constructors remain for backward compatibility.
+func NewServerFromApp(app *core.App) *Server {
+	embedStore := app.EmbedStore
+	s := &Server{
+		sessionMgr:  app.SessionMgr,
+		embedStore:  app.EmbedStore,
+		cfg:         app.Config,
+		logger:      app.Logger,
+		infer:       app.Infer,
+		vaultR:      app.VaultR,
+		vaultW:      app.VaultW,
+		chMgr:       app.ChMgr,
+		router:      app.ModelRouter,
+		filterChain: app.FilterChain,
+		chainExecutor: app.ChainExecutor,
+		chainRouter:   app.ChainRouter,
+		sessionStore:  app.SessionStore,
+		sedimenter:    app.Sedimenter,
+	}
+	_ = embedStore
+	s.setupRoutes()
 	return s
 }
 
@@ -131,13 +157,13 @@ func (s *Server) setupRoutes() {
 		internal.POST("/wiki/ingest", s.handleWikiIngest)
 	}
 
-	// Session history API — for loading past conversations on page refresh.
+	// Session history API 鈥?for loading past conversations on page refresh.
 	sessionGroup := r.Group("/sessions")
 	{
 		sessionGroup.GET("", s.handleListSessions)
 		sessionGroup.GET("/:channel/:userId/messages", s.handleGetSessionMessages)
 	}
-	// WebChat channel 鈥擶ebSocket endpoint + static widget files.
+	// WebChat channel 閳ユ摱ebSocket endpoint + static widget files.
 	r.GET("/channels/webchat/ws", func(c *gin.Context) {
 		handleWebSocket(s.logger, s.infer, s.vaultR, s.router, s.filterChain, s.sessionMgr, s.embedStore, s.chainExecutor, s.chainRouter, s.sessionStore, s.sedimenter)(c.Writer, c.Request)
 	})
@@ -205,7 +231,7 @@ func (s *Server) handleChatViaChain(c *gin.Context, body []byte, req chatRequest
 
 	responseText := result.FinalAnswer
 	if responseText == "" {
-		responseText = "抱歉，我暂时无法回答这个问题。"
+		responseText = "\u62b1\u6b49\uff0c\u6211\u6682\u65f6\u65e0\u6cd5\u56de\u7b54\u8fd9\u4e2a\u95ee\u9898\u3002"
 	}
 
 	// Build OpenAI-compatible response.
@@ -451,7 +477,7 @@ func (s *Server) handleWikiIngest(c *gin.Context) {
 
 	responseText := result.FinalAnswer
 	if responseText == "" {
-		responseText = "抱歉，我暂时无法回答这个问题。"
+		responseText = "\u62b1\u6b49\uff0c\u6211\u6682\u65f6\u65e0\u6cd5\u56de\u7b54\u8fd9\u4e2a\u95ee\u9898\u3002"
 	}
 
 	// Log chain trace for debugging.
@@ -537,4 +563,5 @@ func extractQuery(msgs []message) string {
 	}
 	return ""
 }
+
 

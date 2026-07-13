@@ -1,4 +1,4 @@
-package chain
+﻿package chain
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
-// ── Go-Native Steps ──
+// 鈹€鈹€ Go-Native Steps 鈹€鈹€
 //
 // These steps perform deterministic operations on the filesystem or in-memory.
 // They do NOT call LLMs. They are fast, cheap, and never hallucinate.
@@ -19,7 +19,7 @@ import (
 // Steps are designed to be composable: a VaultSearchStep can feed into
 // a VaultReadStep which feeds into an LLMAnswerStep.
 
-// ── Vault Search Step ──
+// 鈹€鈹€ Vault Search Step 鈹€鈹€
 
 // VaultSearchStep performs keyword + embedding search on the vault.
 type VaultSearchStep struct {
@@ -106,7 +106,7 @@ func (s *VaultSearchStep) Run(ctx context.Context, state *ChainState) error {
 				s.logger.Warn("vault read page for chunk fallback failed",
 					zap.String("path", m.path), zap.Error(err))
 			} else if page.Body != "" {
-				body = findBestChunkByTokens(page.Body, query)
+				body = vault.FindBestChunk(page.Body, query)
 			}
 		}
 		state.AddSource(VaultSource{
@@ -127,7 +127,7 @@ func (s *VaultSearchStep) Run(ctx context.Context, state *ChainState) error {
 	return nil
 }
 
-// ── Vault Read Step ──
+// 鈹€鈹€ Vault Read Step 鈹€鈹€
 
 // VaultReadStep reads a specific vault page and adds it to sources.
 type VaultReadStep struct {
@@ -169,7 +169,7 @@ func (s *VaultReadStep) Run(ctx context.Context, state *ChainState) error {
 	return nil
 }
 
-// ── Vault Index Step ──
+// 鈹€鈹€ Vault Index Step 鈹€鈹€
 
 // VaultIndexStep reads and parses the vault index.md.
 type VaultIndexStep struct {
@@ -200,7 +200,7 @@ func (s *VaultIndexStep) Run(ctx context.Context, state *ChainState) error {
 	return nil
 }
 
-// ── Page Preprocess Step ──
+// 鈹€鈹€ Page Preprocess Step 鈹€鈹€
 
 // PagePreprocessStep cleans and normalizes retrieved page bodies.
 // Removes YAML frontmatter, wiki links, and truncates long content.
@@ -227,7 +227,7 @@ func (s *PagePreprocessStep) Run(ctx context.Context, state *ChainState) error {
 			body = string([]rune(body)[:s.maxBodyLen]) + "..."
 		}
 
-		// Clean wiki internal links: [[link]] → link.
+		// Clean wiki internal links: [[link]] 鈫?link.
 		body = cleanWikiLinks(body)
 
 		state.Sources[i].Body = body
@@ -237,8 +237,8 @@ func (s *PagePreprocessStep) Run(ctx context.Context, state *ChainState) error {
 
 // cleanWikiLinks converts [[page|alias]] and [[page]] to the alias or page name.
 func cleanWikiLinks(text string) string {
-	// [[显示文字]] → 显示文字
-	// [[页面名]] → 页面名
+	// [[鏄剧ず鏂囧瓧]] 鈫?鏄剧ず鏂囧瓧
+	// [[椤甸潰鍚峕] 鈫?椤甸潰鍚?
 	result := text
 	for {
 		start := strings.Index(result, "[[")
@@ -259,10 +259,10 @@ func cleanWikiLinks(text string) string {
 	return result
 }
 
-// ── Context Assembly Step ──
+// 鈹€鈹€ Context Assembly Step 鈹€鈹€
 
 // ContextAssemblyStep builds a system prompt from retrieved sources.
-// This is the RAG "assemble" step: retrieved docs → structured prompt.
+// This is the RAG "assemble" step: retrieved docs 鈫?structured prompt.
 type ContextAssemblyStep struct {
 	maxSources int
 }
@@ -284,7 +284,7 @@ func (s *ContextAssemblyStep) Run(ctx context.Context, state *ChainState) error 
 	}
 
 	var sb strings.Builder
-	sb.WriteString("你可以参考以下知识库内容来回答问题:\n\n")
+	sb.WriteString("浣犲彲浠ュ弬鑰冧互涓嬬煡璇嗗簱鍐呭鏉ュ洖绛旈棶棰?\n\n")
 
 	count := 0
 	for _, src := range state.Sources {
@@ -311,9 +311,9 @@ func sourceTitles(sources []VaultSource) string {
 	return strings.Join(titles, ", ")
 }
 
-// ── Query Classification Step ──
+// 鈹€鈹€ Query Classification Step 鈹€鈹€
 
-// ── RRF Fusion for chain types ──
+// 鈹€鈹€ RRF Fusion for chain types 鈹€鈹€
 
 type mergedHit struct {
 	path     string
@@ -325,40 +325,6 @@ type mergedHit struct {
 }
 
 const rrfK = 60
-
-
-// findBestChunkByTokens splits raw body text using vault chunking and returns
-// the chunk with the best bigram overlap against the query.
-// Falls back to the full body if chunking produces nothing.
-func findBestChunkByTokens(bodyText, query string) string {
-	if len([]rune(bodyText)) <= 800 {
-		return bodyText
-	}
-	// Create a minimal Page for the vault chunker.
-	page := &vault.Page{Body: bodyText}
-	chunks := vault.ChunkPage(page)
-	if len(chunks) == 0 {
-		return bodyText
-	}
-	queryRunes := []rune(strings.ToLower(query))
-	bestScore := 0
-	bestContent := bodyText[:min(800, len([]rune(bodyText)))]
-	for _, c := range chunks {
-		contentRunes := []rune(strings.ToLower(c.Content))
-		score := 0
-		for i := 0; i < len(queryRunes)-1; i++ {
-			window := string(queryRunes[i : i+2])
-			if strings.Contains(string(contentRunes), window) {
-				score++
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			bestContent = c.Content
-		}
-	}
-	return bestContent
-}
 
 func rrfFuseSearchResults(bm25 []vault.SearchResult, embed []EmbeddingHit) []mergedHit {
 	scores := make(map[string]float64)

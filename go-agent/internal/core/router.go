@@ -23,14 +23,14 @@ type RouteDecision struct {
 // Router is the centralized model routing engine.
 // It examines each request and decides which AI model should handle it.
 // All routing logic lives here — nothing is hardcoded in gateway or channels.
-type Router struct {
+type ModelRouter struct {
 	defaultLocal string // e.g. "gemma4:12b"
 	visionLocal  string // e.g. "llava:7b"
 }
 
 // NewRouter creates a model router with the given local model names.
-func NewRouter(defaultLocal, visionLocal string) *Router {
-	return &Router{
+func NewModelRouter(defaultLocal, visionLocal string) *ModelRouter {
+	return &ModelRouter{
 		defaultLocal: defaultLocal,
 		visionLocal:  visionLocal,
 	}
@@ -45,7 +45,7 @@ func NewRouter(defaultLocal, visionLocal string) *Router {
 //   - Explicit model name → uses it directly
 //   - "auto" → delegates to default local model
 //   - "cloud" → routes to cloud (stub for Phase 2.8)
-func (r *Router) Decide(body []byte, modelHint string, metadata map[string]string) *RouteDecision {
+func (r *ModelRouter) Decide(body []byte, modelHint string, metadata map[string]string) *RouteDecision {
 	// 1. If the user explicitly named a model, use it.
 	if modelHint != "" && modelHint != "auto" && modelHint != "cloud" {
 		return &RouteDecision{
@@ -129,7 +129,7 @@ func hasImage(body []byte) bool {
 // Route is kept for backward compatibility with Phase 1 code.
 // New code should use router.Decide() instead.
 func Route(modelHint string) *RouteDecision {
-	r := NewRouter("gemma4:12b", "llava:7b")
+	r := NewModelRouter("gemma4:12b", "llava:7b")
 	return r.Decide(nil, modelHint, nil)
 }
 

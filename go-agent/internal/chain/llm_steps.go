@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/yuanleyao/ai-agent/internal/inference"
+	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // LLMAnswerStep calls the LLM with retrieved context to answer a question.
@@ -125,7 +126,7 @@ func (s *LLMSummarizeStep) Run(ctx context.Context, state *ChainState) error {
 	raw = strings.TrimSpace(raw)
 	var sum StructuredSummary
 	if err := json.Unmarshal([]byte(raw), &sum); err != nil {
-		sum = StructuredSummary{Title: truncate(raw, 100), Decisions: "see original", FollowUps: "none", Confidence: 0.5}
+		sum = StructuredSummary{Title: vault.Truncate(raw, 100), Decisions: "see original", FollowUps: "none", Confidence: 0.5}
 	}
 	state.Summary = &sum
 	state.Data["summary_title"] = sum.Title
@@ -234,7 +235,7 @@ func (s *LLMCrossLinkStep) Name() string { return "llm-cross-link" }
 func (s *LLMCrossLinkStep) Run(ctx context.Context, state *ChainState) error {
 	if len(state.Sources) < 2 { state.FinalAnswer = "cross-link needs at least 2 pages"; return nil }
 	var pt strings.Builder
-	for i, src := range state.Sources { pt.WriteString(fmt.Sprintf("Page %d: %s\n%s\n\n", i+1, src.Title, truncate(src.Body, 500))) }
+	for i, src := range state.Sources { pt.WriteString(fmt.Sprintf("Page %d: %s\n%s\n\n", i+1, src.Title, vault.Truncate(src.Body, 500))) }
 	prompt := fmt.Sprintf("Analyze the following wiki pages and find cross-reference relationships that should but don't yet exist.\n\nFor each pair, explain:\n1. What is the relationship? (conceptual dependency, complement, contrast, practice/theory)\n2. Which section should add a [[link]]?\n3. Connection strength (1-5)\n\nPages:\n%s", pt.String())
 	reqBody, err := json.Marshal(map[string]interface{}{
 		"model": s.model, "messages": []map[string]string{{"role": "user", "content": prompt}},

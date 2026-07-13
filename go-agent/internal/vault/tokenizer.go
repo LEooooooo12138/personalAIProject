@@ -54,9 +54,7 @@ var enStopWords = map[string]bool{
 	"where": true, "how": true, "all": true, "each": true, "every": true,
 }
 
-func isStopWord(tok string) bool {
-	return cjkStopWords[tok] || enStopWords[strings.ToLower(tok)]
-}
+
 
 // tokenizeQuery splits a query into meaningful search tokens.
 //
@@ -96,7 +94,7 @@ func tokenizeQuery(query string) []string {
 		if len([]rune(tok)) < 2 {
 			continue
 		}
-		if isStopWord(tok) {
+		if IsStopWord(tok) {
 			continue
 		}
 		if seen[tok] {
@@ -176,10 +174,10 @@ func splitIntoSegments(text string) []segment {
 	}
 
 	start := 0
-	currentIsCJK := isCJKRune(runes[0])
+	currentIsCJK := IsCJK(runes[0])
 	for i := 1; i < len(runes); i++ {
 		r := runes[i]
-		cjk := isCJKRune(r)
+		cjk := IsCJK(r)
 		// Transition boundary: skip punctuation that sits between CJK and ASCII.
 		if cjk != currentIsCJK && !unicode.IsPunct(r) && r != ' ' && r != '_' {
 			segs = append(segs, segment{text: string(runes[start:i]), isCJK: currentIsCJK})
@@ -191,11 +189,6 @@ func splitIntoSegments(text string) []segment {
 	return segs
 }
 
-func isCJKRune(r rune) bool {
-	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified
-		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
-		(r >= 0xF900 && r <= 0xFAFF) // CJK Compatibility
-}
 
 // ── Tokenizers ──
 

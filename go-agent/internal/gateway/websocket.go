@@ -1,4 +1,4 @@
-package gateway
+﻿package gateway
 
 import (
 	"context"
@@ -33,10 +33,10 @@ type wsConn struct {
 	logger     *zap.Logger
 	infer      inference.Client
 	vaultR     vault.Reader
-	router     *core.Router
+	router     *core.ModelRouter
 	filter     *filter.Chain
 	sessionMgr *core.SessionManager
-	embedStore *EmbeddingStore
+	embedStore *vault.EmbeddingStore
 
 	chainExecutor *chain.ChainExecutor
 	chainRouter   *chain.ChainRouter
@@ -66,8 +66,8 @@ type vaultSource struct {
 	Body  string
 }
 
-func handleWebSocket(logger *zap.Logger, infer inference.Client, vr vault.Reader, router *core.Router, fc *filter.Chain, sessionMgr *core.SessionManager,
-	embedStore *EmbeddingStore, chainExecutor *chain.ChainExecutor, chainRouter *chain.ChainRouter, sessionStore *core.SessionStore, sedimenter *memory.Sedimenter) http.HandlerFunc {
+func handleWebSocket(logger *zap.Logger, infer inference.Client, vr vault.Reader, router *core.ModelRouter, fc *filter.Chain, sessionMgr *core.SessionManager,
+	embedStore *vault.EmbeddingStore, chainExecutor *chain.ChainExecutor, chainRouter *chain.ChainRouter, sessionStore *core.SessionStore, sedimenter *memory.Sedimenter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -416,7 +416,7 @@ type rrfEntry struct {
 	sectionTitle string
 }
 
-func rrfFuse(bm25 []vault.SearchResult, embed []EmbeddingResult) []rrfEntry {
+func rrfFuse(bm25 []vault.SearchResult, embed []vault.EmbeddingResult) []rrfEntry {
 	scores := make(map[string]float64)
 	titles := make(map[string]string)
 	chunkContent := make(map[string]string)

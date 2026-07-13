@@ -12,17 +12,21 @@ import (
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
+	"github.com/yuanleyao/ai-agent/internal/vault"
+	"github.com/yuanleyao/ai-agent/internal/chain"
 )
 
 type Agent struct {
-	cfg         *Config
-	logger      *zap.Logger
-	sessionMgr  *SessionManager
-	sedimenter  *memory.Sedimenter
-	filterChain *filter.Chain
-	router      *Router
-	chMgr       *channel.Manager
-	infer       inference.Client
+	cfg           *Config
+	logger        *zap.Logger
+	sessionMgr    *SessionManager
+	sedimenter    *memory.Sedimenter
+	filterChain   *filter.Chain
+	modelRouter   *ModelRouter
+	chMgr         *channel.Manager
+	infer         inference.Client
+	chainExecutor *chain.ChainExecutor
+	chainRouter   *chain.ChainRouter
 }
 
 type AgentDeps struct {
@@ -31,9 +35,11 @@ type AgentDeps struct {
 	SessionMgr  *SessionManager
 	Sedimenter  *memory.Sedimenter
 	FilterChain *filter.Chain
-	Router      *Router
-	ChannelMgr  *channel.Manager
-	Infer       inference.Client
+	ModelRouter   *ModelRouter
+	ChannelMgr    *channel.Manager
+	Infer         inference.Client
+	ChainExecutor *chain.ChainExecutor
+	ChainRouter   *chain.ChainRouter
 }
 
 func NewAgent(deps AgentDeps) *Agent {
@@ -43,7 +49,7 @@ func NewAgent(deps AgentDeps) *Agent {
 		sessionMgr:  deps.SessionMgr,
 		sedimenter:  deps.Sedimenter,
 		filterChain: deps.FilterChain,
-		router:      deps.Router,
+		modelRouter:      deps.ModelRouter,
 		chMgr:       deps.ChannelMgr,
 		infer:       deps.Infer,
 	}
@@ -66,7 +72,7 @@ func (a *Agent) handleMessage(msg channel.Message) {
 	a.logger.Info("handling message",
 		zap.String("channel", msg.ChannelID),
 		zap.String("user", msg.UserID),
-		zap.String("content", truncate(msg.Content, 100)),
+		zap.String("content", vault.Truncate(msg.Content, 100)),
 	)
 
 	session, err := a.sessionMgr.GetOrCreate(msg.ChannelID, msg.UserID)
@@ -89,22 +95,38 @@ func (a *Agent) handleMessage(msg channel.Message) {
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
-	decision := a.router.Decide(nil, "", metadata)
+	var responseText string
+	if a.chainExecutor != nil && a.chainRouter != nil {
+		state := chain.NewChainState(msg.Content, "personal", metadata)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), a.cfg.Inference.Timeout)
+		result, err := a.chainExecutor.Run(ctx2, "chat", state)
+		cancel2()
+		if err != nil {
+			a.logger.Error("chain error", zap.Error(err))
+			return
+		}
+		responseText = result.FinalAnswer
+		if responseText == "" {
+			a.logger.Warn("chain produced empty response")
+			return
+		}
+	} else {
+		decision := a.modelRouter.Decide(nil, "", metadata)
+		reqBody := buildChatRequest(decision.TargetModel, msg.Content)
+		inferCtx, cancel := context.WithTimeout(context.Background(), a.cfg.Inference.Timeout)
+		defer cancel()
 
-	reqBody := buildChatRequest(decision.TargetModel, msg.Content)
-	inferCtx, cancel := context.WithTimeout(context.Background(), a.cfg.Inference.Timeout)
-	defer cancel()
+		rawResp, err := a.infer.Chat(inferCtx, json.RawMessage(reqBody))
+		if err != nil {
+			a.logger.Error("llm error", zap.Error(err))
+			return
+		}
 
-	rawResp, err := a.infer.Chat(inferCtx, json.RawMessage(reqBody))
-	if err != nil {
-		a.logger.Error("llm error", zap.Error(err))
-		return
-	}
-
-	responseText, err := extractResponseContent(rawResp)
-	if err != nil {
-		a.logger.Error("parse response failed", zap.Error(err))
-		return
+		responseText, err = extractResponseContent(rawResp)
+		if err != nil {
+			a.logger.Error("parse response failed", zap.Error(err))
+			return
+		}
 	}
 
 	ch, err := a.chMgr.Get(msg.ChannelID)
@@ -199,10 +221,3 @@ func sessionToConversation(s *Session) *memory.Conversation {
 	}
 }
 
-func truncate(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen]) + "..."
-}
