@@ -1,4 +1,4 @@
-﻿# Go build artifacts
+# Go build artifacts
 go-agent/agentd.exe
 go-agent/agentd.exe~
 go-agent/.gocache/
@@ -18,3 +18,6 @@ __pycache__/
 
 # Wiki pages (source and distilled, not engineering)
 wiki-pages/
+
+# Config with secrets
+go-agent/config/agent.yaml

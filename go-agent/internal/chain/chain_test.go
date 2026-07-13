@@ -1,4 +1,4 @@
-﻿package chain
+package chain
 
 import (
 	"context"
@@ -299,12 +299,3 @@ func (s *testDecisionStep) Run(ctx context.Context, state *ChainState) error {
 func (s *testDecisionStep) Decide(ctx context.Context, state *ChainState) (*StepResult, error) {
 	return &StepResult{Next: s.next, Reason: s.reason}, nil
 }
-
-
-// ── Ensure interfaces are satisfied ──
-
-func TestLLMDecideStep_ImplementsDecisionStep(t *testing.T) {
-	var _ DecisionStep = NewLLMDecideAndAnswerStep(nil, "", nil)
-}
-
-

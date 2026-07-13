@@ -1,4 +1,4 @@
-﻿# Project Constitution: 全阶段架构约束与工程标准
+# Project Constitution: 全阶段架构约束与工程标准
 
 > **定位**: 本文件为 personalAIProject 的最高约束文档。每一个子阶段（Phase 1.1 到 Phase 4.x）开工前必须读取，收工验收时必须对照自检。
 > **原则**: 规范是为保障目标服务，不为规范而规范。如有冲突，以"两大终极需求"为准（本地文件操作 + 可复用 API）。
@@ -69,10 +69,10 @@ go-agent/
 │   ├── vault/        # Vault 读写——直接操作文件系统，不依赖 obsidian-wiki CLI
 │   ├── memory/       # 长期记忆——Phase 2 启用
 │   └── skill/        # Skill 实现——Phase 2 启用
-├── pkg/              # 可复用工具库（config、logger、errors）
-└── config/           # YAML 配置文件
-```
-
+├── chain/         # Chain 流水线系统（LangChain 风格 Step 组合）
+├── filter/        # 输出过滤器链（PII → Sensitive → PersonalRef → Platform → Length）
+├── agent/         # Agent 工具接口
+└── config/        # YAML 配置文件
 **耦合度检查清单**（每次代码变更后自检）：
 
 - [ ] `cmd/agentd/main.go` 的行数是否 < 100？（不应膨胀为"上帝函数"）
@@ -260,5 +260,5 @@ Phase 4: 智能家居 + 自动化                         [依赖 Phase 3]
 
 ---
 
-> **本文件最后更新**: 2026-07-01
-> **下次审查**: Phase 1.3 收工时（验证是否所有标准在实际代码中可执行）
+> **本文件最后更新**: 2026-07-13
+> **修订**: 移除 `pkg/` 目录要求（当前结构更合理，Go 标准库足以覆盖配置/日志/错误需求），注明 Python Inference Service 已被 Go 原生 Ollama 客户端替代
