@@ -1,9 +1,6 @@
-﻿package vault
+package vault
 
-import (
-	"os"
-	"path/filepath"
-)
+import "path/filepath"
 
 // ── BM25 Scorer ──
 //
@@ -35,11 +32,11 @@ func bm25Search(root string, tokens []string, systemFiles map[string]bool) ([]bm
 		return nil, nil
 	}
 
-	cachePath := filepath.Join(root, bm25CacheDir, bm25CacheFile)
+	cachePath := filepath.Join(bm25CacheDir, bm25CacheFile)
 	idx := &InvertedIndex{}
 
 	// Try loading cached index.
-	if err := idx.LoadFromFile(cachePath); err == nil && idx.Validate(root) {
+	if data, err := readRootFile(root, cachePath); err == nil && idx.loadCache(data) == nil && idx.Validate(root) {
 		return idx.SearchWithBM25(tokens, bm25k1, bm25b), nil
 	}
 
@@ -48,12 +45,8 @@ func bm25Search(root string, tokens []string, systemFiles map[string]bool) ([]bm
 		return nil, err
 	}
 
-	// Ensure cache directory exists.
-	os.MkdirAll(filepath.Dir(cachePath), 0755)
-
-	// Best-effort persist.
-	if err := idx.SaveToFile(cachePath); err != nil {
-		// Non-fatal: search still works, just slower next time.
+	if data, err := idx.marshalCache(); err == nil {
+		_ = writeRootFile(root, filepath.Join(bm25CacheDir, bm25CacheFile), data, 0600)
 	}
 
 	return idx.SearchWithBM25(tokens, bm25k1, bm25b), nil

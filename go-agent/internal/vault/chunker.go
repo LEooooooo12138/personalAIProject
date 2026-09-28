@@ -1,6 +1,9 @@
-﻿package vault
+package vault
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // ── Page Chunker ──
 //
@@ -168,5 +171,5 @@ func lastNChars(s string, n int) string {
 }
 
 func pageToChunkID(page *Page, idx int) string {
-	return page.Title + "#section-" + string(rune('0'+idx%10))
+	return page.Title + "#section-" + strconv.Itoa(idx)
 }

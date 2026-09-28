@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Phase 1.2: Ollama model verification
 set -euo pipefail
 

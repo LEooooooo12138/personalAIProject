@@ -1,5 +1,7 @@
 # Phase 4 设计：智能家居 + 自动化
 
+> **2026-09-28 修订说明**：本页原 Tuya Open API 接入属于云端方案。本地 LLM → HA → Tuya 局域网控制以 [补充规划](2026-09-28-local-llm-ha-tuya-lan.md) 为准，其中列出当前实现边界、官方资料依据和断网验收步骤；本页历史架构中的 Python/Sidecar/Qdrant 不代表当前 Go 原生实现。
+
 > **依赖**: Phase 1-3 完成（知识库 + Agent + WeChat + 容器化）
 > **目标**: Agent 接入 Home Assistant，定期分析设备数据，建议并创建自动化规则
 

@@ -12,7 +12,7 @@
   "use strict";
 
   var DEFAULTS = {
-    endpoint: "ws://" + location.host + "/channels/webchat/ws",
+    endpoint: (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/channels/webchat/ws",
     theme: "dark",
     position: "bottom-right",
     greeting: "你好，有什么可以帮你的？",
@@ -217,7 +217,7 @@
   function loadHistory(userId) {
     var apiBase = cfg.endpoint.replace("/channels/webchat/ws", "").replace("ws://", "http://").replace("wss://", "https://");
     var url = apiBase + "/sessions/webchat/" + encodeURIComponent(userId) + "/messages";
-    fetch(url)
+    fetch(url, { credentials: "include" })
       .then(function(r) { return r.json(); })
       .then(function(data) {
         historyLoaded = true;
@@ -260,7 +260,7 @@
 
   function loadSessionList() {
     var apiBase = cfg.endpoint.replace("/channels/webchat/ws", "").replace("ws://", "http://").replace("wss://", "https://");
-    fetch(apiBase + "/sessions?channel=webchat")
+    fetch(apiBase + "/sessions?channel=webchat", { credentials: "include" })
       .then(function(r) { return r.json(); })
       .then(function(sessions) {
         renderSessionList(sessions || []);
@@ -347,7 +347,17 @@
            d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
   }
 
+  var connecting = false;
   function connect() {
+    if (connecting || (ws && ws.readyState === WebSocket.OPEN)) return;
+    connecting = true;
+    var apiBase = cfg.endpoint.replace("/channels/webchat/ws", "").replace("ws://", "http://").replace("wss://", "https://");
+    fetch(apiBase + "/auth/browser", { method: "POST", credentials: "include" })
+      .then(function (r) { if (!r.ok) throw new Error("Browser authentication failed"); connecting = false; openConnection(); })
+      .catch(function () { connecting = false; scheduleReconnect(); });
+  }
+
+  function openConnection() {
     if (ws && ws.readyState === WebSocket.OPEN) return;
 
     try {
@@ -401,6 +411,7 @@
         // Final response: clear any streaming state and display the complete message.
         var streamMsg = document.getElementById("cw-stream-msg");
         if (streamMsg) {
+            streamMsg.innerHTML = renderMd(data.content || "");
             streamMsg.removeAttribute("id");
             streamMsg._rawText = null;
         } else {

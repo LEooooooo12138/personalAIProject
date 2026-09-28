@@ -3,8 +3,10 @@ package wecom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -48,15 +50,15 @@ func (m *TokenManager) refresh(ctx context.Context) (string, error) {
 		return m.token, nil
 	}
 
-	url := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=%s&corpsecret=%s", m.corpID, m.corpSecret)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	endpoint := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + (url.Values{"corpid": {m.corpID}, "corpsecret": {m.corpSecret}}).Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("wecom: create request: %w", err)
+		return "", safeRequestError("create token request", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("wecom: do request: %w", err)
+		return "", safeRequestError("get token", err)
 	}
 	defer resp.Body.Close()
 
@@ -78,6 +80,15 @@ func (m *TokenManager) refresh(ctx context.Context) (string, error) {
 	m.token = result.AccessToken
 	m.expiresAt = time.Now().Add(time.Duration(result.ExpiresIn-100) * time.Second)
 	return m.token, nil
+}
+
+// net/http wraps transport errors in url.Error, whose URL contains credentials.
+func safeRequestError(operation string, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return fmt.Errorf("wecom: %s: %w", operation, err)
 }
 
 func (m *TokenManager) StartAutoRefresh(ctx context.Context) {

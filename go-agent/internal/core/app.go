@@ -1,4 +1,4 @@
-﻿package core
+package core
 
 import (
 	"context"
@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 
 	"go.uber.org/zap"
 
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
-	"github.com/yuanleyao/ai-agent/internal/channel/wecom"
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
+	"github.com/yuanleyao/ai-agent/internal/smarthome"
 	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
@@ -37,11 +38,17 @@ type App struct {
 	ChainExecutor *chain.ChainExecutor
 	ChainRouter   *chain.ChainRouter
 
-	Sedimenter *memory.Sedimenter
-	EmbedStore *vault.EmbeddingStore
+	Sedimenter      *memory.Sedimenter
+	EmbedStore      *vault.EmbeddingStore
+	AgentEmbedStore *vault.EmbeddingStore
+
+	// Smart home subsystem (Phase 4).
+	SmartHome *smarthome.Manager
 
 	Agent  *Agent
-	Server interface{ Run(ctx context.Context) error }
+	Server interface {
+		Run(ctx context.Context) error
+	}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -62,11 +69,11 @@ func Bootstrap(configPath string) (*App, error) {
 	backend := inference.NewOllamaClient(cfg.Inference.Endpoint, cfg.Inference.Timeout)
 
 	app := &App{
-		Config:      cfg,
-		Logger:      logger,
-		Infer:       backend,
-		VaultR:      vault.NewFileReader(cfg.Vaults.Personal, cfg.Vaults.Agent),
-		VaultW:      vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
+		Config: cfg,
+		Logger: logger,
+		Infer:  backend,
+		VaultR: vault.NewFileReader(cfg.Vaults.Personal, cfg.Vaults.Agent),
+		VaultW: vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
 	}
 
 	// Channels
@@ -74,18 +81,11 @@ func Bootstrap(configPath string) (*App, error) {
 	app.ChMgr.Register(channel.NewInternalChannel())
 
 	if cfg.Channels.Wecom.Enabled {
-		wcCfg := wecom.Config{
-			Enabled:        cfg.Channels.Wecom.Enabled,
-			ListenAddr:     cfg.Channels.Wecom.ListenAddr,
-			CorpID:         cfg.Channels.Wecom.CorpID,
-			CorpSecret:     cfg.Channels.Wecom.CorpSecret,
-			AgentID:        cfg.Channels.Wecom.AgentID,
-			Token:          cfg.Channels.Wecom.Token,
-			EncodingAESKey: cfg.Channels.Wecom.EncodingAESKey,
-			AllowedUsers:   cfg.Channels.Wecom.AllowedUsers,
-			AutoApprove:    cfg.Channels.Wecom.AutoApprove,
+		factory, ok := channel.GetFactory("wecom")
+		if !ok {
+			logger.Fatal("wecom channel enabled but factory not registered (import missing?)")
 		}
-		wcAdapter, err := wecom.NewAdapter(wcCfg, logger)
+		wcAdapter, err := factory.Create(cfg.Channels.Wecom.Config, logger)
 		if err != nil {
 			logger.Fatal("wecom adapter", zap.Error(err))
 		}
@@ -106,7 +106,7 @@ func Bootstrap(configPath string) (*App, error) {
 	app.SessionMgr = NewSessionManager(sessionCfg, logger)
 
 	// Session persistence
-	embedAdapter := &ollamaEmbedder{client: backend}
+	embedAdapter := &ollamaEmbedder{client: backend, model: cfg.Inference.Models.Embedding}
 	app.SessionStore = NewSessionStore(app.SessionMgr, cfg.Vaults.Agent+"/_sessions", embedAdapter, logger)
 	if err := app.SessionStore.Initialize(context.Background()); err != nil {
 		logger.Warn("session store init failed (non-fatal)", zap.Error(err))
@@ -116,7 +116,25 @@ func Bootstrap(configPath string) (*App, error) {
 	app.Sedimenter = memory.NewSedimenter(cfg.Vaults.Personal, memory.NewSummarizer(app.Infer, logger), logger)
 
 	// Embedding store
-	app.EmbedStore = vault.NewEmbeddingStore(app.Infer, app.VaultR, cfg.Vaults.Personal, logger)
+	app.EmbedStore = vault.NewScopedEmbeddingStore(app.Infer, app.VaultR, cfg.Vaults.Personal, "personal", cfg.Inference.Models.Embedding, logger)
+	app.AgentEmbedStore = vault.NewScopedEmbeddingStore(app.Infer, app.VaultR, cfg.Vaults.Agent, "agent", cfg.Inference.Models.Embedding, logger)
+
+	// Smart home subsystem (Phase 4).
+	if cfg.SmartHome.Enabled && cfg.SmartHome.BaseURL != "" {
+		shCfg := smarthome.HAConfig{
+			BaseURL:         cfg.SmartHome.BaseURL,
+			Token:           cfg.SmartHome.Token,
+			PollIntervalSec: cfg.SmartHome.PollIntervalSec,
+			AnalysisHour:    cfg.SmartHome.AnalysisHour,
+			AgentVaultPath:  cfg.SmartHome.AgentVaultPath,
+		}
+		shMgr, err := smarthome.NewManager(shCfg, logger)
+		if err != nil {
+			logger.Warn("smart home manager init failed (non-fatal)", zap.Error(err))
+		} else {
+			app.SmartHome = shMgr
+		}
+	}
 
 	// Trigger entities for RAG routing
 	triggerEntities, err := vault.ExtractTriggerEntities(cfg.Vaults.Personal, nil)
@@ -126,23 +144,15 @@ func Bootstrap(configPath string) (*App, error) {
 	logger.Info("trigger entities extracted", zap.Int("count", len(triggerEntities)))
 
 	// Chain system
-	embedSearchAdapter := chain.NewEmbeddingStoreAdapter(
-		func(ctx context.Context, query string, k int) ([]chain.EmbeddingHit, error) {
-			results, err := app.EmbedStore.Search(ctx, query, k)
-			if err != nil {
-				return nil, err
+	embedSearchAdapter := chain.NewVaultEmbeddingStoreAdapter(
+		func(ctx context.Context, vaultName, query string, k int) ([]vault.EmbeddingResult, error) {
+			if vaultName == "agent" {
+				return app.AgentEmbedStore.Search(ctx, query, k)
 			}
-			hits := make([]chain.EmbeddingHit, len(results))
-			for i, r := range results {
-				hits[i] = chain.EmbeddingHit{
-					PagePath:     r.PagePath,
-					Title:        r.Title,
-					Score:        r.Score,
-					ChunkContent: r.ChunkContent,
-					SectionTitle: r.SectionTitle,
-				}
+			if vaultName == "personal" {
+				return app.EmbedStore.Search(ctx, query, k)
 			}
-			return hits, nil
+			return nil, fmt.Errorf("unknown vault")
 		},
 	)
 
@@ -156,6 +166,9 @@ func Bootstrap(configPath string) (*App, error) {
 		AgentPath:       cfg.Vaults.Agent,
 		Logger:          logger,
 		TriggerEntities: triggerEntities,
+		RRFK:            cfg.Retrieval.RRFK,
+		TopK:            cfg.Retrieval.TopK,
+		MaxChunkChars:   cfg.Retrieval.MaxChunkChars,
 	}
 
 	app.ChainRouter, err = chain.BuildAllChains(chainDeps)
@@ -189,15 +202,35 @@ func (app *App) Run() error {
 	app.ctx = ctx
 	app.cancel = cancel
 
+	defer app.ChMgr.StopAll()
 	if err := app.ChMgr.StartAll(ctx); err != nil {
 		return fmt.Errorf("start channels: %w", err)
 	}
-	defer app.ChMgr.StopAll()
 	defer app.Logger.Sync()
+	if app.SmartHome != nil {
+		app.SmartHome.Start(ctx)
+		defer app.SmartHome.Stop()
+	}
 
-	go app.EmbedStore.Warmup()
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
+	for _, store := range []*vault.EmbeddingStore{app.EmbedStore, app.AgentEmbedStore} {
+		if store == nil {
+			continue
+		}
+		workers.Add(1)
+		go func(store *vault.EmbeddingStore) {
+			defer workers.Done()
+			store.WarmupContext(ctx)
+		}(store)
+	}
 
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		if err := app.Agent.Run(ctx); err != nil && err != context.Canceled {
 			app.Logger.Error("agent loop error", zap.Error(err))
 		}
@@ -205,7 +238,7 @@ func (app *App) Run() error {
 
 	if app.Server != nil {
 		if err := app.Server.Run(ctx); err != nil {
-			app.Logger.Fatal("server stopped", zap.Error(err))
+			return fmt.Errorf("server stopped: %w", err)
 		}
 	}
 
@@ -216,10 +249,13 @@ func (app *App) Run() error {
 // Context returns the app's lifecycle context.
 func (app *App) Context() context.Context { return app.ctx }
 
-type ollamaEmbedder struct{ client inference.Client }
+type ollamaEmbedder struct {
+	client inference.Client
+	model  string
+}
 
 func (e *ollamaEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	req := map[string]interface{}{"model": "bge-m3", "input": text}
+	req := map[string]interface{}{"model": e.model, "input": text}
 	body, _ := json.Marshal(req)
 	resp, err := e.client.Embed(ctx, body)
 	if err != nil {

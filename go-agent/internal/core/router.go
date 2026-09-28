@@ -1,4 +1,4 @@
-﻿package core
+package core
 
 import (
 	"bytes"
@@ -57,6 +57,9 @@ func (r *ModelRouter) Decide(body []byte, modelHint string, metadata map[string]
 	}
 
 	// 2. Cloud routing (Phase 2.8 stub).
+	if modelHint == "cloud" && (metadata["sensitive"] == "true" || metadata["skill"] != "") {
+		return &RouteDecision{TargetModel: r.defaultLocal, Backend: "local", Fallback: "fail", Reason: "sensitive or skill request must stay local"}
+	}
 	if modelHint == "cloud" {
 		return &RouteDecision{
 			TargetModel: "deepseek-chat",
@@ -116,10 +119,6 @@ func (r *ModelRouter) Decide(body []byte, modelHint string, metadata map[string]
 // A request with images is typically much larger than text-only,
 // so checking raw bytes avoids allocating full parse trees.
 func hasImage(body []byte) bool {
-	// Quick pre-check: if the body is small, it can't contain a base64 image.
-	if len(body) < 100 {
-		return false
-	}
 	return bytes.Contains(body, []byte(`"image_url"`)) ||
 		bytes.Contains(body, []byte(`data:image/`))
 }

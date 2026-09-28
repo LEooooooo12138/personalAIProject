@@ -1,0 +1,66 @@
+# Copy to agent.yaml. Export variables in the process environment before starting;
+# the application does not automatically load config/.env.
+server:
+  port: 8080
+  internal_key: "${AGENT_INTERNAL_KEY}"
+  shutdown_timeout: 10s
+  chain_timeout: 300s
+  search_timeout: 30s
+
+inference:
+  endpoint: "http://localhost:11434"
+  models:
+    local: "gemma4:12b"
+    vision: "llava:7b"
+    embedding: "bge-m3"
+  timeout: 300s
+
+vaults:
+  personal: "${PERSONAL_VAULT_PATH}"
+  agent: "${AGENT_VAULT_PATH}"
+
+retrieval:
+  rrf_k: 60
+  top_k: 5
+  max_chunk_chars: 800
+  search_timeout: 30s
+
+session:
+  max_rounds: 20
+  idle_timeout: 30m
+  scan_interval: 1m
+  max_sessions: 100
+
+memory:
+  dedup_threshold: 0.45
+  min_messages: 3
+
+personality:
+  enabled: false
+  name: ""
+  tone: "neutral"
+  system_prompt: ""
+
+channels:
+  wecom:
+    enabled: false
+    config:
+      listen_addr: ":8081"
+      corp_id: "${WECOM_CORP_ID}"
+      corp_secret: "${WECOM_CORP_SECRET}"
+      agent_id: "${WECOM_AGENT_ID}"
+      token: "${WECOM_CALLBACK_TOKEN}"
+      encoding_aes_key: "${WECOM_AES_KEY}"
+      allowed_users: []
+      auto_approve: false
+
+smarthome:
+  enabled: false
+  base_url: "http://localhost:8123"
+  token: "${HA_ACCESS_TOKEN}"
+  poll_interval_sec: 3600
+  analysis_hour: 3
+
+logging:
+  level: "info"
+  format: "console"

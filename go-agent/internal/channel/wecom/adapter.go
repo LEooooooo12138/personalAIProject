@@ -1,4 +1,4 @@
-﻿package wecom
+package wecom
 
 import (
 	"context"

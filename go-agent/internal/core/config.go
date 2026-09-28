@@ -13,16 +13,21 @@ type Config struct {
 	Server      ServerConfig
 	Inference   InferenceConfig
 	Vaults      VaultsConfig
+	Retrieval   RetrievalConfig
 	Session     SessionConfig
 	Memory      MemoryConfig
 	Personality PersonalityConfig
 	Logging     LoggingConfig
 	Channels    ChannelsConfig
+	SmartHome   SmartHomeConfig
 }
 
 type ServerConfig struct {
-	Port        int    `mapstructure:"port"`
-	InternalKey string `mapstructure:"internal_key"`
+	Port            int           `mapstructure:"port"`
+	InternalKey     string        `mapstructure:"internal_key"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	ChainTimeout    time.Duration `mapstructure:"chain_timeout"`
+	SearchTimeout   time.Duration `mapstructure:"search_timeout"`
 }
 
 type InferenceConfig struct {
@@ -40,6 +45,13 @@ type ModelsConfig struct {
 type VaultsConfig struct {
 	Personal string `mapstructure:"personal"`
 	Agent    string `mapstructure:"agent"`
+}
+
+type RetrievalConfig struct {
+	RRFK          int           `mapstructure:"rrf_k"`
+	TopK          int           `mapstructure:"top_k"`
+	MaxChunkChars int           `mapstructure:"max_chunk_chars"`
+	SearchTimeout time.Duration `mapstructure:"search_timeout"`
 }
 
 type SessionConfig struct {
@@ -70,16 +82,20 @@ type ChannelsConfig struct {
 	Wecom WecomChannelConfig `mapstructure:"wecom"`
 }
 
+// SmartHomeConfig holds Home Assistant connection and automation settings.
+type SmartHomeConfig struct {
+	Enabled         bool   `mapstructure:"enabled"`
+	BaseURL         string `mapstructure:"base_url"`
+	Token           string `mapstructure:"token"`
+	PollIntervalSec int    `mapstructure:"poll_interval_sec"`
+	AnalysisHour    int    `mapstructure:"analysis_hour"`
+	// AgentVaultPath is where rule documents and reports are written.
+	AgentVaultPath string `mapstructure:"agent_vault_path"`
+}
+
 type WecomChannelConfig struct {
-	Enabled        bool     `mapstructure:"enabled"`
-	ListenAddr     string   `mapstructure:"listen_addr"`
-	CorpID         string   `mapstructure:"corp_id"`
-	CorpSecret     string   `mapstructure:"corp_secret"`
-	AgentID        string   `mapstructure:"agent_id"`
-	Token          string   `mapstructure:"token"`
-	EncodingAESKey string   `mapstructure:"encoding_aes_key"`
-	AllowedUsers   []string `mapstructure:"allowed_users"`
-	AutoApprove    bool     `mapstructure:"auto_approve"`
+	Enabled bool                   `mapstructure:"enabled"`
+	Config  map[string]interface{} `mapstructure:"config"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -97,9 +113,8 @@ func LoadConfig(path string) (*Config, error) {
 		val := v.GetString(key)
 		if strings.HasPrefix(val, "${") && strings.HasSuffix(val, "}") {
 			envName := val[2 : len(val)-1]
-			if envVal, ok := os.LookupEnv(envName); ok {
-				v.Set(key, envVal)
-			}
+			// Missing secrets must never become usable literal ${NAME} credentials.
+			v.Set(key, os.Getenv(envName))
 		}
 	}
 
@@ -138,8 +153,38 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Memory.DedupThreshold == 0 {
 		cfg.Memory.DedupThreshold = 0.45
 	}
+	if cfg.Retrieval.RRFK == 0 {
+		cfg.Retrieval.RRFK = 60
+	}
+	if cfg.Retrieval.TopK == 0 {
+		cfg.Retrieval.TopK = 5
+	}
+	if cfg.Retrieval.MaxChunkChars == 0 {
+		cfg.Retrieval.MaxChunkChars = 800
+	}
+	if cfg.Retrieval.SearchTimeout == 0 {
+		cfg.Retrieval.SearchTimeout = 30 * time.Second
+	}
+	if cfg.Server.ShutdownTimeout == 0 {
+		cfg.Server.ShutdownTimeout = 10 * time.Second
+	}
+	if cfg.Server.ChainTimeout == 0 {
+		cfg.Server.ChainTimeout = 300 * time.Second
+	}
+	if cfg.Server.SearchTimeout == 0 {
+		cfg.Server.SearchTimeout = 30 * time.Second
+	}
 	if cfg.Memory.MinMessages == 0 {
 		cfg.Memory.MinMessages = 3
+	}
+	if cfg.SmartHome.PollIntervalSec == 0 {
+		cfg.SmartHome.PollIntervalSec = 3600
+	}
+	if cfg.SmartHome.AnalysisHour == 0 {
+		cfg.SmartHome.AnalysisHour = 3
+	}
+	if cfg.SmartHome.AgentVaultPath == "" && cfg.Vaults.Agent != "" {
+		cfg.SmartHome.AgentVaultPath = cfg.Vaults.Agent + "/smart-home"
 	}
 
 	return &cfg, nil

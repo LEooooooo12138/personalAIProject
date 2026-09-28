@@ -1,15 +1,16 @@
-﻿package gateway
+package gateway
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -19,22 +20,23 @@ import (
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
+	"github.com/yuanleyao/ai-agent/internal/smarthome"
 	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 type Server struct {
-	sessionMgr    *core.SessionManager
-	embedStore    *vault.EmbeddingStore
-	cfg           *core.Config
-	logger        *zap.Logger
-	infer         inference.Client
-	vaultR        vault.Reader
-	vaultW        vault.Writer
-	chMgr         *channel.Manager
-	router        *core.ModelRouter
-	filterChain   *filter.Chain
-	engine        *gin.Engine
-	srv           *http.Server
+	sessionMgr  *core.SessionManager
+	embedStore  *vault.EmbeddingStore
+	cfg         *core.Config
+	logger      *zap.Logger
+	infer       inference.Client
+	vaultR      vault.Reader
+	vaultW      vault.Writer
+	chMgr       *channel.Manager
+	router      *core.ModelRouter
+	filterChain *filter.Chain
+	engine      *gin.Engine
+	srv         *http.Server
 
 	// Chain system (LangChain-style pipeline).
 	chainExecutor *chain.ChainExecutor
@@ -42,16 +44,17 @@ type Server struct {
 
 	// Session persistence + vector store.
 	sessionStore *core.SessionStore
-	sedimenter  *memory.Sedimenter
+	sedimenter   *memory.Sedimenter
+	smartHome    *smarthome.Manager
 }
 
 func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.ModelRouter, filterChain *filter.Chain, sessionMgr *core.SessionManager, embedStore *vault.EmbeddingStore) *Server {
 	if embedStore == nil {
-        embedStore = vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger)
-    }
-    s := &Server{
+		embedStore = vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger)
+	}
+	s := &Server{
 		sessionMgr:  sessionMgr,
-		embedStore: vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger),
+		embedStore:  vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger),
 		cfg:         cfg,
 		logger:      logger,
 		infer:       infer,
@@ -75,26 +78,26 @@ func NewServerWithChains(cfg *core.Config, logger *zap.Logger, infer inference.C
 	return s
 }
 
-
 // NewServerFromApp creates a server from the centralized App container.
 // This is the preferred constructor; older multi-param constructors remain for backward compatibility.
 func NewServerFromApp(app *core.App) *Server {
 	embedStore := app.EmbedStore
 	s := &Server{
-		sessionMgr:  app.SessionMgr,
-		embedStore:  app.EmbedStore,
-		cfg:         app.Config,
-		logger:      app.Logger,
-		infer:       app.Infer,
-		vaultR:      app.VaultR,
-		vaultW:      app.VaultW,
-		chMgr:       app.ChMgr,
-		router:      app.ModelRouter,
-		filterChain: app.FilterChain,
+		sessionMgr:    app.SessionMgr,
+		embedStore:    app.EmbedStore,
+		cfg:           app.Config,
+		logger:        app.Logger,
+		infer:         app.Infer,
+		vaultR:        app.VaultR,
+		vaultW:        app.VaultW,
+		chMgr:         app.ChMgr,
+		router:        app.ModelRouter,
+		filterChain:   app.FilterChain,
 		chainExecutor: app.ChainExecutor,
 		chainRouter:   app.ChainRouter,
 		sessionStore:  app.SessionStore,
 		sedimenter:    app.Sedimenter,
+		smartHome:     app.SmartHome,
 	}
 	_ = embedStore
 	s.setupRoutes()
@@ -103,7 +106,7 @@ func NewServerFromApp(app *core.App) *Server {
 
 func (s *Server) Run(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
-	s.srv = &http.Server{Addr: addr, Handler: s.engine}
+	s.srv = &http.Server{Addr: addr, Handler: s.engine, BaseContext: func(net.Listener) context.Context { return ctx }}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -118,7 +121,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	case <-ctx.Done():
 		s.logger.Info("http server shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownTimeout)
 		defer cancel()
 		return s.srv.Shutdown(shutdownCtx)
 	}
@@ -128,13 +131,10 @@ func (s *Server) setupRoutes() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"*"},
-		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		AllowCredentials: true,
-	}))
-	r.Use(AuthMiddleware(s.cfg.Server.InternalKey))
+	access := newAccessControl(s.cfg.Server.InternalKey)
+	r.Use(access.middleware())
+	r.Use(RequestIDHeader())
+	r.POST("/auth/browser", access.bootstrap)
 
 	r.GET("/health", s.handleHealth)
 
@@ -154,6 +154,13 @@ func (s *Server) setupRoutes() {
 		internal.GET("/vault/search", s.handleVaultSearch)
 		internal.POST("/filter/test", s.handleFilterTest)
 		internal.GET("/sessions/search", s.handleSessionSearch)
+		// Smart home endpoints (Phase 4).
+		internal.GET("/smarthome/status", s.handleSmartHomeStatus)
+		internal.GET("/smarthome/devices", s.handleSmartHomeDevices)
+		internal.GET("/smarthome/suggestions", s.handleSmartHomeSuggestions)
+		internal.POST("/smarthome/suggestions/:id/confirm", s.handleSmartHomeConfirm)
+		internal.POST("/smarthome/suggestions/:id/ignore", s.handleSmartHomeIgnore)
+		internal.POST("/smarthome/analyze", s.handleSmartHomeAnalyze)
 		internal.POST("/wiki/ingest", s.handleWikiIngest)
 	}
 
@@ -186,21 +193,31 @@ func (s *Server) handleListChains(c *gin.Context) {
 }
 
 // handleChatWithChain handles /v1/chat/completions using the chain system.
-// Falls back to legacy path if chains are not initialized.
+// Returns 503 if chain system is not initialized.
 func (s *Server) handleChatWithChain(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 8*1024*1024))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 		return
 	}
 
-	var req chatRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request json"})
+	req, err := parseChatRequest(body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": err.Error(), "type": "invalid_request_error"}})
 		return
 	}
+	decision := s.router.Decide(body, req.Model, req.Metadata)
+	if decision.Backend != "local" {
+		c.JSON(422, gin.H{"error": gin.H{"message": "cloud routing is not configured", "type": "invalid_request_error"}})
+		return
+	}
+	req.Model = decision.TargetModel
+	req.Raw["model"] = req.Model
 
 	query := extractQuery(req.Messages)
+	if query == "" {
+		query = "[multimodal request]"
+	}
 
 	// If chains are available, use them.
 	if s.chainRouter != nil && s.chainExecutor != nil && query != "" {
@@ -208,30 +225,39 @@ func (s *Server) handleChatWithChain(c *gin.Context) {
 		return
 	}
 
-	// Legacy path (fallback).
-	s.handleChatLegacyHTTP(c, body, req, query)
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "chain system not initialized"})
 }
 
 // handleChatViaChain runs the chat chain.
 func (s *Server) handleChatViaChain(c *gin.Context, body []byte, req chatRequest, query string) {
 	// Build chain state.
-	metadata := map[string]string{"channel": "rest-api"}
+	metadata := req.Metadata
+	metadata["channel"] = "rest-api"
 	state := chain.NewChainState(query, "personal", metadata)
+	state.Data["chat_request"] = req.Raw
 
 	// Execute the chat chain.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.Server.ChainTimeout)
 	defer cancel()
 
-	result, err := s.chainExecutor.Run(ctx, "chat", state)
+	chainName := "chat"
+	if req.Metadata["skill"] == "wiki-query" {
+		chainName = "rag-answer"
+	}
+	result, err := s.chainExecutor.Run(ctx, chainName, state)
+	if err == nil && result != nil {
+		err = result.Error
+	}
 	if err != nil {
 		s.logger.Error("chain chat failed", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("chain execution failed: %v", err)})
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "chat generation failed", "type": "upstream_error"}})
 		return
 	}
 
 	responseText := result.FinalAnswer
 	if responseText == "" {
-		responseText = "\u62b1\u6b49\uff0c\u6211\u6682\u65f6\u65e0\u6cd5\u56de\u7b54\u8fd9\u4e2a\u95ee\u9898\u3002"
+		c.JSON(502, gin.H{"error": gin.H{"message": "empty model response", "type": "upstream_error"}})
+		return
 	}
 
 	// Build OpenAI-compatible response.
@@ -258,6 +284,12 @@ func (s *Server) handleChatViaChain(c *gin.Context, body []byte, req chatRequest
 	}
 
 	// Include source citations if available.
+	if raw, ok := state.Data["chat_response"].(json.RawMessage); ok {
+		var upstream map[string]interface{}
+		if json.Unmarshal(raw, &upstream) == nil {
+			resp = upstream
+		}
+	}
 	if state.HasSources() {
 		var srcs []map[string]interface{}
 		for _, src := range state.Sources {
@@ -279,60 +311,12 @@ func (s *Server) handleChatViaChain(c *gin.Context, body []byte, req chatRequest
 		)
 	}
 
-	c.JSON(http.StatusOK, resp)
-}
-
-// handleChatLegacyHTTP is the original handler, kept as fallback.
-func (s *Server) handleChatLegacyHTTP(c *gin.Context, body []byte, req chatRequest, query string) {
-	bodyForRoute, err := json.Marshal(req)
-	if err != nil {
-		s.logger.Warn("marshal request for routing failed", zap.Error(err))
-	}
-	decision := s.router.Decide(bodyForRoute, req.Model, nil)
-	s.logger.Debug("routing", zap.String("model", decision.TargetModel))
-
-	if query != "" {
-		results, err := s.vaultR.Search(c.Request.Context(), "personal", query)
-		if err != nil {
-			s.logger.Warn("vault search failed", zap.Error(err))
-		} else if len(results) > 0 {
-			var ctxStr strings.Builder
-			ctxStr.WriteString("[vault] ")
-			for i, r := range results {
-				if i >= 2 {
-					break
-				}
-				if i > 0 {
-					ctxStr.WriteString("; ")
-				}
-				ctxStr.WriteString(r.Title)
-			}
-			if len(req.Messages) > 0 {
-				last := &req.Messages[len(req.Messages)-1]
-				last.Content = json.RawMessage(`"` + ctxStr.String() + ` | Question: ` + string(last.Content) + `"`)
-			}
-			if enriched, err := json.Marshal(req); err == nil {
-				body = enriched
-			}
-		}
-	}
-
-	req.Model = decision.TargetModel
-	if finalBody, err := json.Marshal(req); err == nil {
-		body = finalBody
-	}
-
-	resp, err := s.infer.Chat(c.Request.Context(), body)
-	if err != nil {
-		s.logger.Error("chat failed", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("inference failed: %v", err)})
+	if req.Stream {
+		writeChatSSE(c, resp)
 		return
 	}
-
-	c.Data(http.StatusOK, "application/json", resp)
+	c.JSON(http.StatusOK, resp)
 }
-
-// --- Existing handlers (unchanged) ---
 
 func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -360,7 +344,9 @@ func (s *Server) handleModels(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("list models failed: %v", err)})
 		return
 	}
-	type entry struct{ ID string `json:"id"` }
+	type entry struct {
+		ID string `json:"id"`
+	}
 	data := make([]entry, len(models))
 	for i, m := range models {
 		data[i] = entry{ID: m.ID}
@@ -415,7 +401,6 @@ func (s *Server) handleFilterTest(c *gin.Context) {
 	})
 }
 
-
 // handleSessionSearch performs semantic search over past conversation history.
 func (s *Server) handleSessionSearch(c *gin.Context) {
 	query := c.Query("q")
@@ -428,7 +413,7 @@ func (s *Server) handleSessionSearch(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.Server.SearchTimeout)
 	defer cancel()
 
 	hits, err := s.sessionStore.SearchSessions(ctx, query, 5)
@@ -465,13 +450,16 @@ func (s *Server) handleWikiIngest(c *gin.Context) {
 	state := chain.NewChainState(req.Content, "personal", metadata)
 	state.Data["raw_content"] = req.Content
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), s.cfg.Server.ChainTimeout)
 	defer cancel()
 
 	result, err := s.chainExecutor.Run(ctx, "wiki-ingest", state)
+	if err == nil && result != nil {
+		err = result.Error
+	}
 	if err != nil {
 		s.logger.Error("wiki ingest chain failed", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("ingest chain failed: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest chain failed"})
 		return
 	}
 
@@ -495,7 +483,6 @@ func (s *Server) handleWikiIngest(c *gin.Context) {
 	})
 }
 
-
 // handleListSessions returns all past session summaries.
 func (s *Server) handleListSessions(c *gin.Context) {
 	channel := c.DefaultQuery("channel", "webchat")
@@ -504,6 +491,10 @@ func (s *Server) handleListSessions(c *gin.Context) {
 		return
 	}
 	infos := s.sessionStore.ListSessions(channel)
+	p := requestPrincipal(c.Request)
+	if !p.Admin {
+		infos = s.sessionStore.ListOwnedSessions(channel, p.Owner)
+	}
 	if infos == nil {
 		infos = []core.SessionInfo{}
 	}
@@ -523,14 +514,27 @@ func (s *Server) handleGetSessionMessages(c *gin.Context) {
 		return
 	}
 	msgs := s.sessionStore.GetMessages(channel, userId)
+	p := requestPrincipal(c.Request)
+	if !p.Admin {
+		var owned bool
+		msgs, owned = s.sessionStore.OwnedMessages(channel, userId, p.Owner)
+		if !owned {
+			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+	}
 	if msgs == nil {
 		msgs = []core.Message{}
 	}
 	c.JSON(200, gin.H{"messages": msgs, "channel": channel, "user_id": userId})
 }
+
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
+	Model    string                 `json:"model"`
+	Messages []message              `json:"messages"`
+	Metadata map[string]string      `json:"-"`
+	Stream   bool                   `json:"stream"`
+	Raw      map[string]interface{} `json:"-"`
 }
 
 type message struct {
@@ -564,4 +568,158 @@ func extractQuery(msgs []message) string {
 	return ""
 }
 
+// --- Smart Home handlers (Phase 4) ---
 
+func (s *Server) handleSmartHomeStatus(c *gin.Context) {
+	if s.smartHome == nil {
+		c.JSON(200, gin.H{"enabled": false, "message": "smart home not configured"})
+		return
+	}
+	states, err := s.smartHome.GetStore().LatestSnapshot()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"enabled": true, "device_count": len(states), "states": states})
+}
+
+func (s *Server) handleSmartHomeDevices(c *gin.Context) {
+	if s.smartHome == nil {
+		c.JSON(200, gin.H{"devices": []interface{}{}})
+		return
+	}
+	states, err := s.smartHome.GetStore().LatestSnapshot()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	type deviceInfo struct {
+		EntityID string `json:"entity_id"`
+		State    string `json:"state"`
+		Name     string `json:"name"`
+	}
+	var devices []deviceInfo
+	for _, st := range states {
+		name := st.EntityID
+		if attrName, ok := st.Attributes["friendly_name"]; ok {
+			if s, ok := attrName.(string); ok {
+				name = s
+			}
+		}
+		devices = append(devices, deviceInfo{
+			EntityID: st.EntityID,
+			State:    st.State,
+			Name:     name,
+		})
+	}
+	c.JSON(200, gin.H{"devices": devices, "count": len(devices)})
+}
+
+func (s *Server) handleSmartHomeSuggestions(c *gin.Context) {
+	if s.smartHome == nil {
+		c.JSON(200, gin.H{"suggestions": []interface{}{}})
+		return
+	}
+	suggestions, err := s.smartHome.GetStore().GetSuggestions()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if suggestions == nil {
+		suggestions = []smarthome.RuleSuggestion{}
+	}
+	// Only return pending suggestions by default
+	filter := c.DefaultQuery("status", "pending")
+	if filter != "" {
+		var filtered []smarthome.RuleSuggestion
+		for _, s := range suggestions {
+			if s.Status == filter {
+				filtered = append(filtered, s)
+			}
+		}
+		suggestions = filtered
+	}
+	c.JSON(200, gin.H{"suggestions": suggestions, "count": len(suggestions)})
+}
+
+func (s *Server) handleSmartHomeConfirm(c *gin.Context) {
+	id := c.Param("id")
+	if s.smartHome == nil {
+		c.JSON(503, gin.H{"error": "smart home not configured"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	suggestion, err := s.smartHome.ConfirmSuggestion(ctx, id)
+	if err != nil {
+		writeSmartHomeError(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"message": "rule created and activated", "id": id, "suggestion": suggestion})
+}
+
+func (s *Server) handleSmartHomeIgnore(c *gin.Context) {
+	id := c.Param("id")
+	if s.smartHome == nil {
+		c.JSON(503, gin.H{"error": "smart home not configured"})
+		return
+	}
+	if _, err := s.smartHome.IgnoreSuggestion(id); err != nil {
+		writeSmartHomeError(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"message": "suggestion ignored", "id": id})
+}
+
+func (s *Server) handleSmartHomeAnalyze(c *gin.Context) {
+	if s.smartHome == nil {
+		c.JSON(503, gin.H{"error": "smart home not configured"})
+		return
+	}
+
+	days := 14
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := c.ShouldBindJSON(&req); err == nil && req.Days > 0 {
+		days = req.Days
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	report, err := s.smartHome.TriggerAnalysis(ctx, days)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"report":      report,
+		"patterns":    len(report.Patterns),
+		"suggestions": len(report.Suggestions),
+		"devices":     len(report.Devices),
+	})
+}
+
+func writeSmartHomeError(c *gin.Context, err error) {
+	status := 500
+	message := "smart home operation failed"
+	switch {
+	case errors.Is(err, smarthome.ErrSuggestionNotFound):
+		status = 404
+		message = "suggestion not found"
+	case errors.Is(err, smarthome.ErrSuggestionConflict):
+		status = 409
+		message = "suggestion state conflicts with this operation"
+	case errors.Is(err, smarthome.ErrUnsupportedRule):
+		status = 422
+		message = "rule requires explicit supported trigger, condition and action"
+	case errors.Is(err, smarthome.ErrHARequest):
+		status = 502
+		message = "Home Assistant request failed"
+	}
+	c.JSON(status, gin.H{"error": message})
+}

@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"flag"
@@ -7,6 +7,8 @@ import (
 
 	"github.com/yuanleyao/ai-agent/internal/core"
 	"github.com/yuanleyao/ai-agent/internal/gateway"
+
+	_ "github.com/yuanleyao/ai-agent/internal/channel/wecom"
 )
 
 func main() {

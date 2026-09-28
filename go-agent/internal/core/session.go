@@ -34,13 +34,14 @@ const (
 // 每个 Session 记录了一段完整的对话：谁、在哪个通道、聊了什么、聊了多久。
 type Session struct {
 	ID           string
-	ChannelID    string       // 通道标识：internal / qclaw / webchat
-	UserID       string       // 用户标识（微信 OpenID 或网页 session ID）
+	ChannelID    string // 通道标识：internal / qclaw / webchat
+	UserID       string // 用户标识（微信 OpenID 或网页 session ID）
+	OwnerID      string // Authenticated browser identity, never supplied by message payload.
 	State        SessionState
-	Messages     []Message    // 对话历史，按时间顺序排列
-	RoundCount   int          // 已对话轮数（一问一答算一轮）
-	StartedAt    time.Time    // 会话开始时间
-	LastActiveAt time.Time    // 最后一条消息的时间
+	Messages     []Message // 对话历史，按时间顺序排列
+	RoundCount   int       // 已对话轮数（一问一答算一轮）
+	StartedAt    time.Time // 会话开始时间
+	LastActiveAt time.Time // 最后一条消息的时间
 	CreatedAt    time.Time
 
 	mu sync.RWMutex // 保护并发访问
@@ -86,11 +87,11 @@ type SessionEndCallback func(session *Session)
 // 会话管理器：保管所有正在进行的对话，定时检查是否有过期会话。
 // 就像一个"对话管家"——谁在聊天、聊了多久、该不该结束了，都由它管。
 type SessionManager struct {
-	cfg       SessionConfig
-	logger    *zap.Logger
-	sessions  map[string]*Session // key → session
-	mu        sync.RWMutex
-	endCh    chan *Session        // 通知外部：有会话结束了
+	cfg      SessionConfig
+	logger   *zap.Logger
+	sessions map[string]*Session // key → session
+	mu       sync.RWMutex
+	endCh    chan *Session // 通知外部：有会话结束了
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -152,9 +153,10 @@ func (m *SessionManager) EndChan() <-chan *Session {
 // 否则创建一个新的。这是外部和会话管理器交互的主入口。
 //
 // 使用的技术：Go 的 map + 读写锁（sync.RWMutex），
-//           RLock（读锁）允许多个 goroutine 同时读，
-//           Lock（写锁）只允许一个 goroutine 写。
-//           这样在绝大多数"获取已有会话"的场景下性能很好。
+//
+//	RLock（读锁）允许多个 goroutine 同时读，
+//	Lock（写锁）只允许一个 goroutine 写。
+//	这样在绝大多数"获取已有会话"的场景下性能很好。
 func (m *SessionManager) GetOrCreate(channelID, userID string) (*Session, error) {
 	key := sessionKey(channelID, userID)
 
@@ -188,7 +190,7 @@ func (m *SessionManager) GetOrCreate(channelID, userID string) (*Session, error)
 	}
 
 	// 检查会话数上限
-	if len(m.sessions) >= m.cfg.MaxSessions {
+	if m.activeCountLocked() >= m.cfg.MaxSessions {
 		return nil, fmt.Errorf("session limit reached (%d)", m.cfg.MaxSessions)
 	}
 
@@ -217,13 +219,16 @@ func (m *SessionManager) GetOrCreate(channelID, userID string) (*Session, error)
 // 向会话中添加一条消息（用户说的或 AI 回的）。
 // 同时更新"最后活跃时间"和对话轮数。
 //
-// 返回值 tells 调用方该会话是否应该结束了。
-// 如果返回 false，说明已达到轮数上限，调用方应该触发会话结束流程。
+// 返回 true 表示消息已加入。下一轮用户消息超过上限时返回 false 且不修改历史；
+// 最后一轮允许的用户消息及其回答必须完整保留。
 func (m *SessionManager) AddMessage(s *Session, msg Message) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.State != SessionActive {
+		return false
+	}
+	if msg.Role == "user" && s.RoundCount >= m.cfg.MaxRounds {
 		return false
 	}
 
@@ -235,14 +240,6 @@ func (m *SessionManager) AddMessage(s *Session, msg Message) bool {
 		s.RoundCount++
 	}
 
-	// 检查是否达到轮数上限
-	if s.RoundCount >= m.cfg.MaxRounds {
-		m.logger.Debug("session round limit reached",
-			zap.String("session_id", s.ID),
-			zap.Int("rounds", s.RoundCount),
-		)
-		return false // 应该结束
-	}
 	return true
 }
 
@@ -278,6 +275,12 @@ func (m *SessionManager) CompleteSession(s *Session) {
 	s.mu.Lock()
 	s.State = SessionClosed
 	s.mu.Unlock()
+	m.mu.Lock()
+	key := sessionKey(s.ChannelID, s.UserID)
+	if m.sessions[key] == s {
+		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
 
 	m.logger.Debug("session closed", zap.String("session_id", s.ID))
 }
@@ -289,8 +292,9 @@ func (m *SessionManager) CompleteSession(s *Session) {
 // 把空闲超时的会话标记为 Ending。
 //
 // 用到的技术：time.Ticker —— 一个定时器，每隔固定时间发送一个信号。
-//           在 Go 中，Ticker 比 time.Sleep + 循环更优雅，
-//           因为它可以被 ctx.Done() 干净地中断。
+//
+//	在 Go 中，Ticker 比 time.Sleep + 循环更优雅，
+//	因为它可以被 ctx.Done() 干净地中断。
 func (m *SessionManager) scanLoop() {
 	ticker := time.NewTicker(m.cfg.ScanInterval)
 	defer ticker.Stop()
@@ -333,7 +337,6 @@ func (m *SessionManager) scanExpired() {
 	}
 }
 
-
 // Mu returns the internal mutex for external coordination (used by SessionStore).
 func (m *SessionManager) Mu() *sync.RWMutex {
 	return &m.mu
@@ -351,7 +354,11 @@ func (m *SessionManager) Sessions() map[string]*Session {
 func (m *SessionManager) ActiveCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.activeCountLocked()
+}
 
+// Caller holds m.mu; pending sedimentation does not consume active conversation slots.
+func (m *SessionManager) activeCountLocked() int {
 	count := 0
 	for _, s := range m.sessions {
 		s.mu.RLock()
@@ -373,6 +380,7 @@ func CloneSession(s *Session) *Session {
 		ID:           s.ID,
 		ChannelID:    s.ChannelID,
 		UserID:       s.UserID,
+		OwnerID:      s.OwnerID,
 		State:        s.State,
 		Messages:     make([]Message, len(s.Messages)),
 		RoundCount:   s.RoundCount,

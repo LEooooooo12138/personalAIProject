@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,7 +18,7 @@ var systemFiles = map[string]bool{
 	".manifest.json": true, "AGENTS.md": true,
 }
 
-// --  Public interfaces -- 
+// --  Public interfaces --
 
 // Reader provides read access to vault pages and metadata.
 type Reader interface {
@@ -33,7 +34,11 @@ type Writer interface {
 	WritePage(ctx context.Context, vault string, relPath string, content []byte) error
 }
 
-// --  Data types -- 
+type IndexWriter interface {
+	UpdateIndex(context.Context, string, IndexEntry) error
+}
+
+// --  Data types --
 
 // IndexEntry represents a row in index.md.
 type IndexEntry struct {
@@ -73,7 +78,7 @@ type Status struct {
 	}
 }
 
-// --  File-based implementation -- 
+// --  File-based implementation --
 
 // FileReader reads vault pages directly from the filesystem.
 // It does NOT shell out to obsidian-wiki CLI.
@@ -92,6 +97,7 @@ func NewFileReader(personalPath, agentPath string) *FileReader {
 
 // FileWriter writes vault pages directly to the filesystem.
 type FileWriter struct {
+	mu           sync.Mutex
 	personalPath string
 	agentPath    string
 }
@@ -123,7 +129,7 @@ func (r *FileReader) ReadIndex(ctx context.Context, vaultName string) ([]IndexEn
 		return nil, err
 	}
 
-	data, err := os.ReadFile(filepath.Join(vp, "index.md"))
+	data, err := readRootFile(vp, "index.md")
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -160,8 +166,7 @@ func (r *FileReader) ReadPage(ctx context.Context, vaultName string, relPath str
 		return nil, err
 	}
 
-	fullPath := filepath.Join(vp, relPath)
-	data, err := os.ReadFile(fullPath)
+	data, err := readRootFile(vp, relPath)
 	if err != nil {
 		return nil, fmt.Errorf("vault: read page %s: %w", relPath, err)
 	}
@@ -189,8 +194,7 @@ func (r *FileReader) Search(ctx context.Context, vaultName string, keyword strin
 
 	var results []SearchResult
 	for _, br := range bm25Results {
-		fullPath := filepath.Join(vp, br.Path)
-		data, err := os.ReadFile(fullPath)
+		data, err := readRootFile(vp, br.Path)
 		if err != nil {
 			continue
 		}
@@ -216,24 +220,27 @@ func (r *FileReader) Search(ctx context.Context, vaultName string, keyword strin
 // extractSnippet finds the first occurrence of any query token and returns
 // surrounding context text.
 func extractSnippet(original, contentLower string, tokens []string) string {
+	runes := []rune(original)
 	for _, tok := range tokens {
 		idx := strings.Index(contentLower, tok)
 		if idx < 0 {
 			continue
 		}
+		// Lowercasing may change UTF-8 byte widths, but preserves rune positions.
+		idx = len([]rune(contentLower[:idx]))
 		start := idx - 40
 		if start < 0 {
 			start = 0
 		}
-		end := idx + len(tok) + 40
-		if end > len(original) {
-			end = len(original)
+		end := idx + len([]rune(tok)) + 40
+		if end > len(runes) {
+			end = len(runes)
 		}
-		return original[start:end]
+		return string(runes[start:end])
 	}
 	// Fallback: first 120 chars.
-	if len(original) > 120 {
-		return original[:120]
+	if len(runes) > 120 {
+		return string(runes[:120])
 	}
 	return original
 }
@@ -258,6 +265,7 @@ func ParsePage(data []byte) (*Page, error) {
 	// Strip UTF-8 BOM if present (Windows PowerShell/Out-File adds it).
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	content := string(data)
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	page := &Page{RawContent: data}
 
 	if strings.HasPrefix(content, "---\n") {
@@ -293,7 +301,7 @@ func ParsePage(data []byte) (*Page, error) {
 	return page, nil
 }
 
-// --  FileWriter methods -- 
+// --  FileWriter methods --
 
 func (w *FileWriter) vaultPath(name string) (string, error) {
 	switch name {
@@ -313,7 +321,12 @@ func (w *FileWriter) AppendLog(ctx context.Context, vaultName string, entry stri
 		return err
 	}
 
-	f, err := os.OpenFile(filepath.Join(vp, "log.md"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	dir, err := os.OpenRoot(vp)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	f, err := dir.OpenFile("log.md", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("vault: append log: %w", err)
 	}
@@ -330,14 +343,44 @@ func (w *FileWriter) WritePage(ctx context.Context, vaultName string, relPath st
 		return err
 	}
 
-	fullPath := filepath.Join(vp, relPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return fmt.Errorf("vault: write page: %w", err)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return os.WriteFile(fullPath, content, 0644)
+	return writeRootFile(vp, relPath, content, 0644)
 }
 
-// --  helpers -- 
+func (w *FileWriter) UpdateIndex(ctx context.Context, vaultName string, entry IndexEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := relativePath(entry.Path); err != nil {
+		return err
+	}
+	vp, err := w.vaultPath(vaultName)
+	if err != nil {
+		return err
+	}
+	existing, err := NewFileReader(w.personalPath, w.agentPath).ReadIndex(ctx, vaultName)
+	if err != nil {
+		return err
+	}
+	for _, item := range existing {
+		if filepath.Clean(item.Path) == filepath.Clean(entry.Path) {
+			return nil
+		}
+	}
+	data, err := readRootFile(vp, "index.md")
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	title := strings.NewReplacer("\r", " ", "\n", " ", "[", "", "]", "").Replace(entry.Title)
+	data = append(data, []byte(fmt.Sprintf("\n- [%s](%s)\n", title, filepath.ToSlash(entry.Path)))...)
+	return writeRootFile(vp, "index.md", data, 0644)
+}
+
+// --  helpers --
 
 func statVault(root string, count *int, totalBytes *int64) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -397,9 +440,9 @@ var entityTriggerTags = map[string]bool{
 // that should trigger RAG search when mentioned in a user query.
 //
 // Entities are extracted from:
-//   1. Pages whose frontmatter category matches entityTriggerCategories.
-//   2. Pages whose frontmatter tags match entityTriggerTags.
-//   3. Short titles (<=6 runes) that do not match wiki meta patterns.
+//  1. Pages whose frontmatter category matches entityTriggerCategories.
+//  2. Pages whose frontmatter tags match entityTriggerTags.
+//  3. Short titles (<=6 runes) that do not match wiki meta patterns.
 //
 // extraEntities provides a manual override list merged into the result.
 // Duplicates are removed.
@@ -431,7 +474,11 @@ func ExtractTriggerEntities(personalPath string, extraEntities []string) ([]stri
 			return nil
 		}
 
-		data, readErr := os.ReadFile(path)
+		relPath, relErr := filepath.Rel(personalPath, path)
+		if relErr != nil {
+			return nil
+		}
+		data, readErr := readRootFile(personalPath, relPath)
 		if readErr != nil {
 			return nil
 		}

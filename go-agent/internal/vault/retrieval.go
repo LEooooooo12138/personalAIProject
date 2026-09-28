@@ -1,4 +1,4 @@
-﻿package vault
+package vault
 
 import "strings"
 
@@ -8,17 +8,19 @@ import "strings"
 // The RRF (Reciprocal Rank Fusion) algorithm merges ranked lists from both backends.
 // This eliminates duplicate implementations in gateway/websocket.go and chain/go_steps.go.
 
-const rrfK = 60
-
 // RetrievalService performs hybrid search over vault content.
 type RetrievalService struct {
 	reader     Reader
 	embedStore *EmbeddingStore
+	rrfK       int
 }
 
 // NewRetrievalService creates a hybrid retrieval service.
-func NewRetrievalService(reader Reader, embedStore *EmbeddingStore) *RetrievalService {
-	return &RetrievalService{reader: reader, embedStore: embedStore}
+func NewRetrievalService(reader Reader, embedStore *EmbeddingStore, rrfK int) *RetrievalService {
+	if rrfK <= 0 {
+		rrfK = 60
+	}
+	return &RetrievalService{reader: reader, embedStore: embedStore, rrfK: rrfK}
 }
 
 // MergedResult is a fused search result with content.
@@ -30,29 +32,37 @@ type MergedResult struct {
 	Score        float64
 	ChunkContent string
 	SectionTitle string
+	Category     string
 }
 
 // RRFMerge fuses BM25 and embedding results using Reciprocal Rank Fusion.
 // Both input lists are assumed to be sorted by descending relevance.
-func RRFMerge(bm25 []SearchResult, embed []EmbeddingResult) []MergedResult {
+func (s *RetrievalService) RRFMerge(bm25 []SearchResult, embed []EmbeddingResult) []MergedResult {
 	scores := make(map[string]float64)
 	titles := make(map[string]string)
 	bodies := make(map[string]string)
 	snippets := make(map[string]string)
+	sections := make(map[string]string)
+	seenDense := make(map[string]bool)
 
 	for i, r := range bm25 {
-		scores[r.Path] += 1.0 / float64(rrfK+i+1)
+		scores[r.Path] += 1.0 / float64(s.rrfK+i+1)
 		titles[r.Path] = r.Title
 		snippets[r.Path] = r.Snippet
 	}
 	for i, r := range embed {
-		scores[r.PagePath] += 1.0 / float64(rrfK+i+1)
+		if r.PagePath == "" || seenDense[r.PagePath] {
+			continue
+		}
+		seenDense[r.PagePath] = true
+		scores[r.PagePath] += 1.0 / float64(s.rrfK+i+1)
 		if titles[r.PagePath] == "" {
 			titles[r.PagePath] = r.Title
 		}
 		if r.ChunkContent != "" {
 			bodies[r.PagePath] = r.ChunkContent
 			snippets[r.PagePath] = r.ChunkContent
+			sections[r.PagePath] = r.SectionTitle
 		}
 	}
 
@@ -65,7 +75,7 @@ func RRFMerge(bm25 []SearchResult, embed []EmbeddingResult) []MergedResult {
 			Snippet:      snippets[path],
 			Score:        score,
 			ChunkContent: bodies[path],
-			SectionTitle: "",
+			SectionTitle: sections[path],
 		})
 	}
 

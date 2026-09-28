@@ -1,4 +1,4 @@
-﻿// ── Chain / Pipeline System ──
+// ── Chain / Pipeline System ──
 //
 // 灵感来自 LangChain 的 Chain 组合模式，用 Go interface + 泛型思想实现。
 //

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -22,7 +24,7 @@ func NewAPIClient(auth *TokenManager, senderID string, logger *zap.Logger) *APIC
 	return &APIClient{
 		auth:     auth,
 		logger:   logger,
-		client:   &http.Client{},
+		client:   &http.Client{Timeout: 30 * time.Second},
 		senderID: senderID,
 	}
 }
@@ -46,16 +48,16 @@ func (c *APIClient) SendText(externalUserID, text string) error {
 		return fmt.Errorf("wecom: marshal payload: %w", err)
 	}
 
-	url := fmt.Sprintf("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/message/send?access_token=%s", token)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	endpoint := "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/message/send?" + (url.Values{"access_token": {token}}).Encode()
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("wecom: create request: %w", err)
+		return safeRequestError("create message request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("wecom: do request: %w", err)
+		return safeRequestError("send message", err)
 	}
 	defer resp.Body.Close()
 
@@ -70,7 +72,7 @@ func (c *APIClient) SendText(externalUserID, text string) error {
 	}
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("wecom: decode response: %w (body: %s)", err, string(respBody))
+		return fmt.Errorf("wecom: decode response: %w", err)
 	}
 
 	if result.Errcode != 0 {

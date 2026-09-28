@@ -1,405 +1,213 @@
-﻿package vault
+package vault
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
+	"maps"
 	"path/filepath"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-// EmbedClient is a minimal interface for embedding inference. Satisfied by EmbedClient.
 type EmbedClient interface {
-	Embed(ctx context.Context, body json.RawMessage) (json.RawMessage, error)
+	Embed(context.Context, json.RawMessage) (json.RawMessage, error)
 }
 
 const (
-	embeddingCacheVersion = 1      // bumped when cache format changes
-	embeddingMinScore     = 0.3    // minimum cosine similarity for a hit
-	embeddingCacheDir     = ".rag-cache"
+	embeddingCacheVersion  = 2
+	embeddingMinScore      = 0.3
+	embeddingCacheDir      = ".rag-cache"
 	embeddingCacheFileName = "embeddings.json"
 )
 
-// embeddingCacheEntry is the serialised form of one embedded chunk.
 type embeddingCacheEntry struct {
-	ChunkID      string    `json:"chunk_id"`
-	PagePath     string    `json:"page_path"`
-	PageTitle    string    `json:"page_title"`
-	SectionTitle string    `json:"section_title"`
-	Content      string    `json:"content"`
-	ContentHash  string    `json:"content_hash"` // SHA-256 hex, first 16 chars
-	Embedding    []float32 `json:"embedding"`
-	Tags         []string  `json:"tags"`
-	Category     string    `json:"category"`
+	Chunk       Chunk     `json:"chunk"`
+	ContentHash string    `json:"content_hash"`
+	Embedding   []float32 `json:"embedding"`
 }
-
-// embeddingCacheFile is the top-level cache document written to disk.
 type embeddingCacheFile struct {
 	Version int                   `json:"version"`
-	BuiltAt int64                 `json:"built_at"` // Unix seconds
+	Model   string                `json:"model"`
+	Vault   string                `json:"vault"`
 	Entries []embeddingCacheEntry `json:"entries"`
 }
-
-// embeddedChunk is a vault chunk with its vector embedding (in-memory form).
 type embeddedChunk struct {
 	chunk     Chunk
 	embedding []float32
 }
 
-// EmbeddingStore holds pre-computed chunk embeddings and provides semantic search.
 type EmbeddingStore struct {
 	mu        sync.RWMutex
 	chunks    []embeddedChunk
+	manifest  map[string]string
 	indexed   bool
-	cachePath string // absolute path to embeddings.json
 	infer     EmbedClient
 	vr        Reader
 	vaultDir  string
+	vaultName string
+	model     string
 	logger    *zap.Logger
 }
 
-// NewEmbeddingStore creates an embedding-backed semantic search index.
-// cachePath is derived from vaultDir/.rag-cache/embeddings.json.
+// NewEmbeddingStore preserves the original personal-vault constructor.
 func NewEmbeddingStore(infer EmbedClient, vr Reader, vaultDir string, logger *zap.Logger) *EmbeddingStore {
-	cacheDir := filepath.Join(vaultDir, embeddingCacheDir)
-	_ = os.MkdirAll(cacheDir, 0755) // best-effort; ensureIndexed will handle errors
-	return &EmbeddingStore{
-		infer:     infer,
-		vr:        vr,
-		vaultDir:  vaultDir,
-		cachePath: filepath.Join(cacheDir, embeddingCacheFileName),
-		logger:    logger,
+	return NewScopedEmbeddingStore(infer, vr, vaultDir, "personal", "bge-m3", logger)
+}
+func NewScopedEmbeddingStore(infer EmbedClient, vr Reader, vaultDir, vaultName, model string, logger *zap.Logger) *EmbeddingStore {
+	if model == "" {
+		model = "bge-m3"
 	}
+	return &EmbeddingStore{infer: infer, vr: vr, vaultDir: vaultDir, vaultName: vaultName, model: model, logger: logger}
+}
+func (es *EmbeddingStore) Warmup() {
+	es.WarmupContext(context.Background())
 }
 
-// Warmup triggers background index building so the first search request
-// does not incur the full indexing cost. Safe to call multiple times.
-func (es *EmbeddingStore) Warmup() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+// WarmupContext lets the application cancel and join startup indexing on exit.
+func (es *EmbeddingStore) WarmupContext(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 	if err := es.ensureIndexed(ctx); err != nil {
 		es.logger.Warn("embedding warmup failed", zap.Error(err))
 	}
 }
 
-// Search performs semantic (dense) search over vault chunks.
-// Returns up to k results sorted by cosine similarity.
-func (es *EmbeddingStore) Search(ctx context.Context, query string, k int) ([]EmbeddingResult, error) {
-	if err := es.ensureIndexed(ctx); err != nil {
-		return nil, err
-	}
-
-	queryVec, err := es.embed(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
-	}
-
-	es.mu.RLock()
-	defer es.mu.RUnlock()
-
-	type scored struct {
-		idx   int
-		score float32
-	}
-	var scores []scored
-	for i, ec := range es.chunks {
-		s := CosineSimilarity32(queryVec, ec.embedding)
-		if s > embeddingMinScore {
-			scores = append(scores, scored{idx: i, score: s})
-		}
-	}
-
-	// Sort descending.
-	for i := 0; i < len(scores); i++ {
-		for j := i + 1; j < len(scores); j++ {
-			if scores[j].score > scores[i].score {
-				scores[i], scores[j] = scores[j], scores[i]
-			}
-		}
-	}
-
-	var results []EmbeddingResult
-	for i, sc := range scores {
-		if i >= k {
-			break
-		}
-		ec := es.chunks[sc.idx]
-		results = append(results, EmbeddingResult{
-			PagePath:     ec.chunk.PagePath,
-			Title:        ec.chunk.PageTitle,
-			Score:        float64(sc.score),
-			ChunkContent: ec.chunk.Content,
-			SectionTitle: ec.chunk.SectionTitle,
-		})
-	}
-	return results, nil
-}
-
 type EmbeddingResult struct {
 	PagePath     string
 	Title        string
 	Score        float64
-	ChunkContent string // matched chunk body text
-	SectionTitle string // H2 heading for provenance display
+	ChunkContent string
+	SectionTitle string
 }
 
-// ensureIndexed guarantees the embedding index is loaded.
-// Priority order:
-//   1. Already indexed in memory 鈫?return immediately.
-//   2. Valid cache file on disk 鈫?load it.
-//   3. Neither 鈫?walk vault, chunk, embed, save cache.
-func (es *EmbeddingStore) ensureIndexed(ctx context.Context) error {
-	es.mu.Lock()
-	if es.indexed {
-		es.mu.Unlock()
-		return nil
+func (es *EmbeddingStore) Search(ctx context.Context, query string, k int) ([]EmbeddingResult, error) {
+	if k <= 0 {
+		return nil, nil
 	}
-	es.mu.Unlock()
-
-	// Try loading from disk cache.
-	if loaded := es.loadFromCache(ctx); loaded {
-		es.mu.Lock()
-		es.indexed = true
-		es.mu.Unlock()
-		es.logger.Info("embedding index loaded from cache",
-			zap.Int("chunks", len(es.chunks)))
-		return nil
+	if err := es.ensureIndexed(ctx); err != nil {
+		return nil, err
 	}
-
-	// Build from scratch.
-	if err := es.buildFromVault(ctx); err != nil {
-		return err
-	}
-
-	// Persist for next start.
-	if err := es.saveToCache(); err != nil {
-		es.logger.Warn("failed to save embedding cache", zap.Error(err))
-		// Non-fatal: index is still usable in memory.
-	}
-
-	es.mu.Lock()
-	es.indexed = true
-	es.mu.Unlock()
-	es.logger.Info("embedding index built and cached",
-		zap.Int("chunks", len(es.chunks)))
-	return nil
-}
-
-// buildFromVault walks the vault, chunks all pages, and embeds every chunk.
-func (es *EmbeddingStore) buildFromVault(ctx context.Context) error {
-	es.logger.Info("building embedding index from ..")
-
-	var allChunks []Chunk
-	err := filepath.WalkDir(es.vaultDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			base := filepath.Base(path)
-			if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		base := filepath.Base(path)
-		if base == "index.md" || base == "log.md" || base == "hot.md" || base == "AGENTS.md" {
-			return nil
-		}
-		relPath, _ := filepath.Rel(es.vaultDir, path)
-
-		page, err := es.vr.ReadPage(ctx, "personal", relPath)
-		if err != nil {
-			return nil
-		}
-		chunks := ChunkPage(page)
-		for i := range chunks {
-			chunks[i].PagePath = relPath
-		}
-		allChunks = append(allChunks, chunks...)
-		return nil
-	})
+	vec, err := es.embed(ctx, query)
 	if err != nil {
-		return fmt.Errorf("walk vault: %w", err)
+		return nil, err
 	}
-
-	es.logger.Info("indexing chunks", zap.Int("count", len(allChunks)))
-
-	var ecs []embeddedChunk
-	for i, c := range allChunks {
-		vec, err := es.embed(ctx, c.Content)
-		if err != nil {
-			es.logger.Warn("embed chunk failed, skipping",
-				zap.String("title", c.PageTitle),
-				zap.Int("chunk", i),
-				zap.Error(err))
-			continue
-		}
-		ecs = append(ecs, embeddedChunk{chunk: c, embedding: vec})
-	}
-
-	es.mu.Lock()
-	es.chunks = ecs
-	es.mu.Unlock()
-	return nil
-}
-
-// 鈹€鈹€ Disk cache 鈹€鈹€
-
-// loadFromCache reads the persisted embedding cache and validates every entry
-// against the current vault content. Returns true if the cache was usable.
-func (es *EmbeddingStore) loadFromCache(ctx context.Context) bool {
-	data, err := os.ReadFile(es.cachePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			es.logger.Warn("read embedding cache failed", zap.Error(err))
-		}
-		return false
-	}
-
-	var cache embeddingCacheFile
-	if err := json.Unmarshal(data, &cache); err != nil {
-		es.logger.Warn("parse embedding cache failed", zap.Error(err))
-		return false
-	}
-	if cache.Version != embeddingCacheVersion {
-		es.logger.Info("embedding cache version mismatch, rebuilding",
-			zap.Int("cached", cache.Version),
-			zap.Int("current", embeddingCacheVersion))
-		return false
-	}
-
-	valid := 0
-	invalid := 0
-	var ecs []embeddedChunk
-
-	for _, entry := range cache.Entries {
-		// Verify the source file still exists and content has not changed.
-		fullPath := filepath.Join(es.vaultDir, entry.PagePath)
-		srcData, err := os.ReadFile(fullPath)
-		if err != nil {
-			invalid++
-			continue
-		}
-		// Re-chunk the page to get the current chunk content, then compare hashes.
-		page, err := ParsePage(srcData)
-		if err != nil {
-			invalid++
-			continue
-		}
-		chunks := ChunkPage(page)
-		found := false
-		for _, c := range chunks {
-			if c.ID == entry.ChunkID {
-				if hashContent(c.Content) == entry.ContentHash {
-					found = true
-					ecs = append(ecs, embeddedChunk{
-						chunk:     c,
-						embedding: entry.Embedding,
-					})
-				}
-				break
-			}
-		}
-		if found {
-			valid++
-		} else {
-			invalid++
-		}
-	}
-
-	if valid == 0 {
-		es.logger.Info("embedding cache stale, rebuilding")
-		return false
-	}
-
-	es.mu.Lock()
-	es.chunks = ecs
-	es.mu.Unlock()
-	es.logger.Info("embedding cache validated",
-		zap.Int("valid", valid),
-		zap.Int("invalid", invalid))
-	return true
-}
-
-// saveToCache serialises the current in-memory index to disk.
-func (es *EmbeddingStore) saveToCache() error {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
-
-	entries := make([]embeddingCacheEntry, 0, len(es.chunks))
+	var results []EmbeddingResult
 	for _, ec := range es.chunks {
-		entries = append(entries, embeddingCacheEntry{
-			ChunkID:      ec.chunk.ID,
-			PagePath:     ec.chunk.PagePath,
-			PageTitle:    ec.chunk.PageTitle,
-			SectionTitle: ec.chunk.SectionTitle,
-			Content:      ec.chunk.Content,
-			ContentHash:  hashContent(ec.chunk.Content),
-			Embedding:    ec.embedding,
-			Tags:         ec.chunk.Tags,
-			Category:     ec.chunk.Category,
-		})
+		score := CosineSimilarity32(vec, ec.embedding)
+		if score > embeddingMinScore {
+			results = append(results, EmbeddingResult{PagePath: ec.chunk.PagePath, Title: ec.chunk.PageTitle, Score: float64(score), ChunkContent: ec.chunk.Content, SectionTitle: ec.chunk.SectionTitle})
+		}
 	}
-
-	cache := embeddingCacheFile{
-		Version: embeddingCacheVersion,
-		BuiltAt: time.Now().Unix(),
-		Entries: entries,
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	if len(results) > k {
+		results = results[:k]
 	}
+	return results, nil
+}
 
-	data, err := json.MarshalIndent(cache, "", "  ")
+// The full manifest is checked on each search. Rebuild publication is atomic;
+// unchanged chunks reuse vectors, failed/cancelled builds remain retryable.
+func (es *EmbeddingStore) ensureIndexed(ctx context.Context) error {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if es.vaultName != "personal" && es.vaultName != "agent" {
+		return fmt.Errorf("unknown embedding vault %q", es.vaultName)
+	}
+	manifest, err := markdownFiles(es.vaultDir, systemFiles)
 	if err != nil {
-		return fmt.Errorf("marshal cache: %w", err)
+		return err
 	}
-	if err := os.WriteFile(es.cachePath, data, 0644); err != nil {
-		return fmt.Errorf("write cache: %w", err)
+	if es.indexed && maps.Equal(manifest, es.manifest) {
+		return nil
+	}
+	reusable := make(map[string][]float32)
+	for _, ec := range es.chunks {
+		reusable[chunkKey(ec.chunk)] = ec.embedding
+	}
+	if !es.indexed {
+		var cache embeddingCacheFile
+		data, err := readRootFile(es.vaultDir, filepath.Join(embeddingCacheDir, embeddingCacheFileName))
+		if err == nil && json.Unmarshal(data, &cache) == nil && cache.Version == embeddingCacheVersion && cache.Model == es.model && cache.Vault == es.vaultName {
+			for _, entry := range cache.Entries {
+				if len(entry.Embedding) > 0 && entry.ContentHash == hashContent(entry.Chunk.Content) {
+					reusable[chunkKey(entry.Chunk)] = entry.Embedding
+				}
+			}
+		}
+	}
+	paths := make([]string, 0, len(manifest))
+	for path := range manifest {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var rebuilt []embeddedChunk
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		page, err := es.vr.ReadPage(ctx, es.vaultName, path)
+		if err != nil {
+			return err
+		}
+		for _, chunk := range ChunkPage(page) {
+			chunk.PagePath = path
+			vec := reusable[chunkKey(chunk)]
+			if len(vec) == 0 {
+				vec, err = es.embed(ctx, chunk.Content)
+				if err != nil {
+					return fmt.Errorf("index %s: %w", path, err)
+				}
+			}
+			rebuilt = append(rebuilt, embeddedChunk{chunk: chunk, embedding: vec})
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	es.chunks = rebuilt
+	es.manifest = manifest
+	es.indexed = true
+	cache := embeddingCacheFile{Version: embeddingCacheVersion, Model: es.model, Vault: es.vaultName}
+	for _, ec := range rebuilt {
+		cache.Entries = append(cache.Entries, embeddingCacheEntry{Chunk: ec.chunk, ContentHash: hashContent(ec.chunk.Content), Embedding: ec.embedding})
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return err
+	}
+	if err := writeRootFile(es.vaultDir, filepath.Join(embeddingCacheDir, embeddingCacheFileName), data, 0600); err != nil {
+		es.logger.Warn("embedding cache save failed", zap.Error(err))
 	}
 	return nil
 }
-
-// hashContent returns a compact content hash (first 16 hex chars of SHA-256).
-func hashContent(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h[:8]) // 8 bytes = 16 hex chars
-}
-
-// 鈹€鈹€ Inference 鈹€鈹€
-
-// embed calls the inference service to get an embedding vector.
+func chunkKey(c Chunk) string     { return c.PagePath + "\x00" + c.ID + "\x00" + hashContent(c.Content) }
+func hashContent(s string) string { h := sha256.Sum256([]byte(s)); return fmt.Sprintf("%x", h[:]) }
 func (es *EmbeddingStore) embed(ctx context.Context, text string) ([]float32, error) {
-	req := map[string]interface{}{
-		"model": "bge-m3",
-		"input": text,
-	}
-	body, _ := json.Marshal(req)
-
+	body, _ := json.Marshal(map[string]interface{}{"model": es.model, "input": text})
 	resp, err := es.infer.Embed(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("embed call: %w", err)
+		return nil, err
 	}
-
 	var result struct {
 		Data []struct {
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("embed parse: %w", err)
+		return nil, err
 	}
-	if len(result.Data) == 0 {
+	if len(result.Data) == 0 || len(result.Data[0].Embedding) == 0 {
 		return nil, fmt.Errorf("empty embedding response")
 	}
 	return result.Data[0].Embedding, nil
 }
-
-// 鈹€鈹€ Cosine Similarity 鈹€鈹€
-

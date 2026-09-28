@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
-	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // EntityTriggerDecideStep is a deterministic, rule-based routing step.
@@ -63,7 +62,6 @@ func (s *EntityTriggerDecideStep) Run(ctx context.Context, state *ChainState) er
 
 			s.logger.Debug("entity trigger matched",
 				zap.String("entity", entity),
-				zap.String("query", vault.Truncate(query, 80)),
 			)
 			return nil
 		}

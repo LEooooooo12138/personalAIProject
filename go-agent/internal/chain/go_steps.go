@@ -1,4 +1,4 @@
-﻿package chain
+package chain
 
 import (
 	"context"
@@ -27,20 +27,16 @@ type VaultSearchStep struct {
 	embedStore EmbeddingSearcher
 	maxResults int
 	logger     *zap.Logger
+	rrfK       int
 }
 
 // EmbeddingSearcher provides dense (semantic) search over embedded chunks.
 type EmbeddingSearcher interface {
-	Search(ctx context.Context, query string, k int) ([]EmbeddingHit, error)
+	Search(ctx context.Context, query string, k int) ([]vault.EmbeddingResult, error)
 }
 
-// EmbeddingHit is a single dense search result.
-type EmbeddingHit struct {
-	PagePath     string
-	Title        string
-	Score        float64
-	ChunkContent string
-	SectionTitle string
+type VaultEmbeddingSearcher interface {
+	SearchVault(ctx context.Context, vaultName, query string, k int) ([]vault.EmbeddingResult, error)
 }
 
 // NewVaultSearchStep creates a hybrid search step (BM25 + embedding).
@@ -53,6 +49,7 @@ func NewVaultSearchStep(reader vault.Reader, embedStore EmbeddingSearcher, maxRe
 		embedStore: embedStore,
 		maxResults: maxResults,
 		logger:     logger,
+		rrfK:       60,
 	}
 }
 
@@ -79,43 +76,60 @@ func (s *VaultSearchStep) Run(ctx context.Context, state *ChainState) error {
 	}
 
 	// Embedding dense search (if available).
-	var embedResults []EmbeddingHit
+	var embedResults []vault.EmbeddingResult
+	denseAvailable := false
 	if s.embedStore != nil {
-		results, err := s.embedStore.Search(ctx, query, s.maxResults*2)
+		var results []vault.EmbeddingResult
+		var err error
+		if scoped, ok := s.embedStore.(VaultEmbeddingSearcher); ok {
+			results, err = scoped.SearchVault(ctx, vaultName, query, s.maxResults*2)
+			denseAvailable = err == nil
+		} else if vaultName == "personal" {
+			results, err = s.embedStore.Search(ctx, query, s.maxResults*2)
+			denseAvailable = err == nil
+		}
 		if err != nil {
 			s.logger.Warn("embedding search error", zap.Error(err))
 		} else {
 			embedResults = results
 		}
 	}
+	if bm25Err != nil && !denseAvailable {
+		return fmt.Errorf("vault search unavailable: %w", bm25Err)
+	}
 
 	// RRF fusion.
-	merged := rrfFuseSearchResults(bm25Results, embedResults)
+	retrieval := vault.NewRetrievalService(s.reader, nil, s.rrfK)
+	merged := retrieval.RRFMerge(bm25Results, embedResults)
 
 	// Add sources to state.
-	for i, m := range merged {
-		if i >= s.maxResults {
+	for _, m := range merged {
+		if len(state.Sources) >= s.maxResults {
 			break
 		}
-		body := m.body
+		if m.Path == "" {
+			continue
+		}
+		page, err := s.reader.ReadPage(ctx, vaultName, m.Path)
+		if err != nil || vault.IsInternalPage(page) {
+			continue
+		}
+		body := m.Body
 		// If no chunk body (e.g., BM25-only hit), read page from disk
 		// and extract the best-matching chunk.
-		if body == "" && m.path != "" {
-			page, err := s.reader.ReadPage(ctx, vaultName, m.path)
-			if err != nil {
-				s.logger.Warn("vault read page for chunk fallback failed",
-					zap.String("path", m.path), zap.Error(err))
-			} else if page.Body != "" {
+		if body == "" && m.Path != "" {
+			if page.Body != "" {
 				body = vault.FindBestChunk(page.Body, query)
 			}
 		}
 		state.AddSource(VaultSource{
-			Title:    m.title,
-			Path:     m.path,
+			Title:    m.Title,
+			Path:     m.Path,
 			Body:     body,
-			Snippet:  m.snippet,
-			Score:    m.score,
-			Category: m.category,
+			Snippet:  m.Snippet,
+			Score:    m.Score,
+			Category: page.Category,
+			Tags:     page.Tags,
 		})
 	}
 
@@ -313,67 +327,9 @@ func sourceTitles(sources []VaultSource) string {
 
 // 鈹€鈹€ Query Classification Step 鈹€鈹€
 
-// 鈹€鈹€ RRF Fusion for chain types 鈹€鈹€
-
-type mergedHit struct {
-	path     string
-	title    string
-	body     string
-	snippet  string
-	score    float64
-	category string
-}
-
-const rrfK = 60
-
-func rrfFuseSearchResults(bm25 []vault.SearchResult, embed []EmbeddingHit) []mergedHit {
-	scores := make(map[string]float64)
-	titles := make(map[string]string)
-	bodies := make(map[string]string)
-	snippets := make(map[string]string)
-
-	for i, r := range bm25 {
-		scores[r.Path] += 1.0 / float64(rrfK+i+1)
-		titles[r.Path] = r.Title
-		snippets[r.Path] = r.Snippet
-	}
-	for i, r := range embed {
-		scores[r.PagePath] += 1.0 / float64(rrfK+i+1)
-		if titles[r.PagePath] == "" {
-			titles[r.PagePath] = r.Title
-		}
-		if r.ChunkContent != "" {
-			bodies[r.PagePath] = r.ChunkContent
-			snippets[r.PagePath] = r.ChunkContent
-		}
-	}
-
-	var results []mergedHit
-	for path, score := range scores {
-		results = append(results, mergedHit{
-			path:    path,
-			title:   titles[path],
-			body:    bodies[path],
-			snippet: snippets[path],
-			score:   score,
-		})
-	}
-
-	// Sort descending.
-	for i := 0; i < len(results); i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[j].score > results[i].score {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
-	return results
-}
-
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
-

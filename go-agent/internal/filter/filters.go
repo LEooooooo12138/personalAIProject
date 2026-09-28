@@ -3,7 +3,6 @@ package filter
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 type Filter interface {
@@ -74,21 +73,12 @@ type SensitiveFilter struct{}
 
 func (f *SensitiveFilter) Name() string { return "sensitive" }
 
-var sensitiveKeywords = []string{
-	"password", "secret", "token", "api_key", "api key",
-	"private key", "access_key",
-}
+var sensitiveRe = regexp.MustCompile(`(?i)\b(password|secret|token|api_key|api key|private key|access_key)\b["']?\s*[=:]\s*("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;}]+)`)
 
 func (f *SensitiveFilter) Apply(text string, _ map[string]string) (string, bool, string) {
-	lower := strings.ToLower(text)
-	for _, kw := range sensitiveKeywords {
-		if strings.Contains(lower, kw) {
-			re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(kw) + `[=:]\s*\S+`)
-			if re.MatchString(text) {
-				text = re.ReplaceAllString(text, kw+"=[REDACTED]")
-				return text, true, fmt.Sprintf("redacted sensitive keyword: %s", kw)
-			}
-		}
+	redacted := sensitiveRe.ReplaceAllString(text, "${1}=[REDACTED]")
+	if redacted != text {
+		return redacted, true, "redacted sensitive fields"
 	}
 	return text, false, ""
 }
@@ -99,18 +89,11 @@ type PersonalRefFilter struct{}
 
 func (f *PersonalRefFilter) Name() string { return "personal_ref" }
 
-var personalRefPatterns = []string{
-	"personal-vault",
-	"personal_vault",
-}
+var personalRefRe = regexp.MustCompile(`(?i)personal[-_]vault`)
 
 func (f *PersonalRefFilter) Apply(text string, _ map[string]string) (string, bool, string) {
 	original := text
-	for _, pat := range personalRefPatterns {
-		if strings.Contains(strings.ToLower(text), strings.ToLower(pat)) {
-			text = strings.ReplaceAll(text, pat, "[internal-reference]")
-		}
-	}
+	text = personalRefRe.ReplaceAllString(text, "[internal-reference]")
 	if text != original {
 		return text, true, "blocked personal-vault reference"
 	}

@@ -45,6 +45,9 @@ func (c *OllamaClient) ChatStream(ctx context.Context, body json.RawMessage) (<-
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("ollama: stream: unmarshal request: %w", err)
 	}
+	if req == nil {
+		return nil, fmt.Errorf("ollama: stream: request must be an object")
+	}
 	req["stream"] = true
 
 	streamBody, err := json.Marshal(req)
@@ -71,13 +74,13 @@ func (c *OllamaClient) ChatStream(ctx context.Context, body json.RawMessage) (<-
 	}
 
 	ch := make(chan StreamChunk, 20)
-	go c.readSSE(resp, ch)
+	go c.readSSE(ctx, resp, ch)
 	return ch, nil
 }
 
 // readSSE reads Server-Sent Events from the response body and writes StreamChunks.
 // Closes the channel when the stream ends.
-func (c *OllamaClient) readSSE(resp *http.Response, ch chan<- StreamChunk) {
+func (c *OllamaClient) readSSE(ctx context.Context, resp *http.Response, ch chan<- StreamChunk) {
 	defer resp.Body.Close()
 	defer close(ch)
 
@@ -86,23 +89,34 @@ func (c *OllamaClient) readSSE(resp *http.Response, ch chan<- StreamChunk) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var accumulated strings.Builder
+	send := func(chunk StreamChunk) bool {
+		select {
+		case ch <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	complete := false
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
 		// SSE data lines start with "data: ".
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
 		// "[DONE]" signals end of stream.
 		if data == "[DONE]" {
+			complete = true
 			break
 		}
 
 		// Parse the chunk.
 		var chunk struct {
+			Error   json.RawMessage `json:"error"`
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
@@ -111,8 +125,12 @@ func (c *OllamaClient) readSSE(resp *http.Response, ch chan<- StreamChunk) {
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			// Skip malformed chunks silently — some SSE lines may be comments.
-			continue
+			send(StreamChunk{Error: fmt.Errorf("ollama: stream: decode event: %w", err)})
+			return
+		}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			send(StreamChunk{Error: fmt.Errorf("ollama: stream: upstream error: %s", chunk.Error)})
+			return
 		}
 
 		if len(chunk.Choices) == 0 {
@@ -122,32 +140,35 @@ func (c *OllamaClient) readSSE(resp *http.Response, ch chan<- StreamChunk) {
 		delta := chunk.Choices[0].Delta.Content
 		if delta != "" {
 			accumulated.WriteString(delta)
-			select {
-			case ch <- StreamChunk{Text: delta}:
-			default:
-				// Channel full — skip to avoid blocking the SSE reader.
-				// The buffer is sized to handle normal cases.
+			if !send(StreamChunk{Text: delta}) {
+				return
 			}
 		}
 
 		// Check for finish_reason.
 		if chunk.Choices[0].FinishReason != nil {
+			complete = true
 			break
 		}
 	}
 
-	// Send final chunk with accumulated text.
-	select {
-	case ch <- StreamChunk{Text: accumulated.String(), Done: true}:
-	default:
+	if err := scanner.Err(); err != nil {
+		send(StreamChunk{Error: fmt.Errorf("ollama: stream: read event: %w", err)})
+		return
 	}
+	if !complete {
+		send(StreamChunk{Error: fmt.Errorf("ollama: stream: unexpected EOF")})
+		return
+	}
+	// Done.Text is the complete response, allowing consumers to reconcile deltas.
+	send(StreamChunk{Text: accumulated.String(), Done: true})
 }
 
 // ── Ollama implementation ──
 
 // OllamaClient proxies requests to an Ollama-compatible HTTP endpoint.
 type OllamaClient struct {
-	endpoint string   // e.g. "http://localhost:11434"
+	endpoint string // e.g. "http://localhost:11434"
 	hc       *http.Client
 	streamHc *http.Client // no timeout, for SSE streaming
 }

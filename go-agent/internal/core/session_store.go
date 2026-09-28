@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,16 +30,16 @@ import (
 
 // SessionStore adds persistence and vector search to session management.
 type SessionStore struct {
-	mgr       *SessionManager
+	mgr         *SessionManager
 	sessionsDir string
 	cachePath   string
 	infer       Embedder
 	logger      *zap.Logger
 
 	// Vector index
-	mu        sync.RWMutex
-	messages  []sessionMessage // embedded messages
-	indexed   bool
+	mu       sync.RWMutex
+	messages []sessionMessage // embedded messages
+	indexed  bool
 }
 
 // Embedder is the interface for generating embeddings (bge-m3 via Ollama).
@@ -58,12 +59,13 @@ type sessionMessage struct {
 
 // sessionFile is the on-disk representation of a session.
 type sessionFile struct {
-	ID           string         `json:"id"`
-	ChannelID    string         `json:"channel_id"`
-	UserID       string         `json:"user_id"`
-	StartedAt    time.Time      `json:"started_at"`
-	LastActiveAt time.Time      `json:"last_active_at"`
-	RoundCount   int            `json:"round_count"`
+	ID           string    `json:"id"`
+	ChannelID    string    `json:"channel_id"`
+	UserID       string    `json:"user_id"`
+	OwnerID      string    `json:"owner_id,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
+	RoundCount   int       `json:"round_count"`
 	Messages     []Message `json:"messages"`
 }
 
@@ -120,15 +122,7 @@ func (ss *SessionStore) Initialize(ctx context.Context) error {
 			continue
 		}
 
-		// Re-create session in SessionManager.
-		s, err := ss.mgr.GetOrCreate(sf.ChannelID, sf.UserID)
-		if err != nil {
-			ss.logger.Warn("failed to restore session", zap.String("id", sf.ID), zap.Error(err))
-			continue
-		}
-		for _, msg := range sf.Messages {
-			ss.mgr.AddMessage(s, msg)
-		}
+		// Historical files remain cold; restore an owned conversation on demand.
 		loaded++
 	}
 	ss.logger.Info("sessions loaded from disk", zap.Int("count", loaded))
@@ -153,6 +147,7 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 		ID:           clone.ID,
 		ChannelID:    clone.ChannelID,
 		UserID:       clone.UserID,
+		OwnerID:      clone.OwnerID,
 		StartedAt:    clone.StartedAt,
 		LastActiveAt: clone.LastActiveAt,
 		RoundCount:   clone.RoundCount,
@@ -165,7 +160,7 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 	}
 
 	// Sanitize filename: replace ":" with "_"
-	filename := strings.ReplaceAll(sf.ID, ":", "_") + ".json"
+	filename := sessionFilename(sf.ID)
 	path := filepath.Join(ss.sessionsDir, filename)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write session file: %w", err)
@@ -176,6 +171,9 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 // IndexMessage generates an embedding for a user message and adds it to the vector index.
 // Should be called after each user message is added to the session.
 func (ss *SessionStore) IndexMessage(ctx context.Context, s *Session, msgIndex int, msg Message) error {
+	if ss.infer == nil {
+		return nil
+	}
 	if msg.Role != "user" {
 		return nil // only index user queries
 	}
@@ -198,7 +196,17 @@ func (ss *SessionStore) IndexMessage(ctx context.Context, s *Session, msgIndex i
 	}
 
 	ss.mu.Lock()
-	ss.messages = append(ss.messages, sm)
+	updated := false
+	for i, existing := range ss.messages {
+		if existing.SessionID == sm.SessionID && existing.MsgIndex == sm.MsgIndex {
+			ss.messages[i] = sm
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		ss.messages = append(ss.messages, sm)
+	}
 	ss.mu.Unlock()
 
 	// Persist embedding cache asynchronously.
@@ -311,17 +319,30 @@ func (ss *SessionStore) saveEmbeddingCache() error {
 func (ss *SessionStore) buildEmbeddings(ctx context.Context) error {
 	ss.logger.Info("building session embeddings...")
 
-	// Collect all user messages from active sessions.
-	ss.mgr.Mu().RLock()
+	// Collect persisted history without consuming active-session capacity.
 	var allMsgs []sessionMessage
-	for _, s := range ss.mgr.Sessions() {
-		clone := CloneSession(s)
-		for i, msg := range clone.Messages {
+	entries, err := os.ReadDir(ss.sessionsDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "embeddings.json" || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(ss.sessionsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var sf sessionFile
+		if json.Unmarshal(data, &sf) != nil {
+			continue
+		}
+		for i, msg := range sf.Messages {
 			if msg.Role != "user" || len(msg.Content) < 3 {
 				continue
 			}
 			allMsgs = append(allMsgs, sessionMessage{
-				SessionID: clone.ID,
+				SessionID: sf.ID,
 				MsgIndex:  i,
 				Role:      msg.Role,
 				Content:   msg.Content,
@@ -329,9 +350,11 @@ func (ss *SessionStore) buildEmbeddings(ctx context.Context) error {
 			})
 		}
 	}
-	ss.mgr.Mu().RUnlock()
 
 	for i := range allMsgs {
+		if ss.infer == nil {
+			break
+		}
 		vec, err := ss.infer.Embed(ctx, allMsgs[i].Content)
 		if err != nil {
 			ss.logger.Warn("embed session message failed", zap.Int("idx", i), zap.Error(err))
@@ -445,8 +468,7 @@ func (ss *SessionStore) GetMessages(channelID, userID string) []Message {
 	ss.mgr.Mu().RUnlock()
 
 	// Fall back to disk.
-	filename := strings.ReplaceAll(key, ":", "_") + ".json"
-	data, err := os.ReadFile(filepath.Join(ss.sessionsDir, filename))
+	data, err := ss.readSessionFile(key)
 	if err != nil {
 		return nil
 	}
@@ -458,3 +480,4 @@ func (ss *SessionStore) GetMessages(channelID, userID string) []Message {
 }
 
 // ── Cosine similarity ──
+func sessionFilename(id string) string { return fmt.Sprintf("%x.json", sha256.Sum256([]byte(id))) }

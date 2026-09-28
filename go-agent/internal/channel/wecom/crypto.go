@@ -1,9 +1,10 @@
-﻿package wecom
+package wecom
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -26,12 +27,10 @@ func NewCrypto(token, encodingAESKey, corpID string, logger *zap.Logger) (*WeCom
 	if err != nil {
 		return nil, fmt.Errorf("wecom: invalid encoding_aes_key: %w", err)
 	}
-	logger.Info("wecom crypto initialized",
-		zap.String("token", token),
-		zap.String("encoding_aes_key", encodingAESKey),
-		zap.String("aes_key_hex", fmt.Sprintf("%x", aesKey)),
-		zap.String("corp_id", corpID),
-	)
+	if len(aesKey) != 32 {
+		return nil, fmt.Errorf("wecom: encoding_aes_key must decode to 32 bytes")
+	}
+	logger.Info("wecom crypto initialized")
 	return &WeComCallbackCrypto{
 		token:          token,
 		encodingAESKey: encodingAESKey,
@@ -48,13 +47,9 @@ func (c *WeComCallbackCrypto) VerifySignature(signature, timestamp, nonce, encry
 	combined := strings.Join(sl, "")
 	s.Write([]byte(combined))
 	got := fmt.Sprintf("%x", s.Sum(nil))
-	ok := got == signature
+	ok := subtle.ConstantTimeCompare([]byte(got), []byte(signature)) == 1
 	if !ok {
-		c.logger.Warn("signature mismatch",
-			zap.String("expected", signature),
-			zap.String("got", got),
-			zap.String("combined", combined),
-		)
+		c.logger.Warn("signature mismatch")
 	}
 	return ok
 }
@@ -84,10 +79,15 @@ func (c *WeComCallbackCrypto) Decrypt(encryptedMsg string) ([]byte, error) {
 	plaintext := make([]byte, len(ciphertext))
 	mode.CryptBlocks(plaintext, ciphertext)
 
-	// Remove PKCS7 padding
+	// WeCom pads to 32 bytes, independently of AES's 16-byte block size.
 	paddingLen := int(plaintext[len(plaintext)-1])
-	if paddingLen < 1 || paddingLen > aes.BlockSize {
+	if paddingLen < 1 || paddingLen > 32 || paddingLen > len(plaintext) {
 		return nil, fmt.Errorf("wecom: invalid pkcs7 padding %d", paddingLen)
+	}
+	for _, b := range plaintext[len(plaintext)-paddingLen:] {
+		if int(b) != paddingLen {
+			return nil, fmt.Errorf("wecom: invalid pkcs7 padding bytes")
+		}
 	}
 	plaintext = plaintext[:len(plaintext)-paddingLen]
 
@@ -97,9 +97,12 @@ func (c *WeComCallbackCrypto) Decrypt(encryptedMsg string) ([]byte, error) {
 	}
 
 	msgLen := binary.BigEndian.Uint32(plaintext[16:20])
-	if uint32(len(plaintext)) < 20+msgLen {
+	if uint64(msgLen) > uint64(len(plaintext)-20) {
 		return nil, fmt.Errorf("wecom: invalid message length: want %d, have %d", msgLen, uint32(len(plaintext))-20)
 	}
-
-	return plaintext[20 : 20+msgLen], nil
+	end := 20 + int(msgLen)
+	if string(plaintext[end:]) != c.corpID {
+		return nil, fmt.Errorf("wecom: receiver does not match configured corp_id")
+	}
+	return plaintext[20:end], nil
 }

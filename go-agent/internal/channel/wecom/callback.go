@@ -1,8 +1,9 @@
-﻿package wecom
+package wecom
 
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -33,7 +34,6 @@ func (h *CallbackHandler) Start(ctx context.Context, addr string, msgCh chan<- c
 			zap.String("method", r.Method),
 			zap.String("remote", r.RemoteAddr),
 			zap.String("path", r.URL.Path),
-			zap.String("query", r.URL.RawQuery),
 		)
 		switch r.Method {
 		case http.MethodGet:
@@ -44,7 +44,7 @@ func (h *CallbackHandler) Start(ctx context.Context, addr string, msgCh chan<- c
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	h.server = &http.Server{Addr: addr, Handler: mux}
+	h.server = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -71,11 +71,7 @@ func (h *CallbackHandler) handleVerification(w http.ResponseWriter, r *http.Requ
 	timestamp := r.URL.Query().Get("timestamp")
 	nonce := r.URL.Query().Get("nonce")
 
-	h.logger.Info("callback verification request",
-		zap.String("signature", signature),
-		zap.String("timestamp", timestamp),
-		zap.String("nonce", nonce),
-	)
+	h.logger.Info("callback verification request")
 
 	if h.crypto.VerifySignature(signature, timestamp, nonce, echostr) {
 		decrypted, err := h.crypto.Decrypt(echostr)
@@ -84,7 +80,7 @@ func (h *CallbackHandler) handleVerification(w http.ResponseWriter, r *http.Requ
 			http.Error(w, "decrypt failed", http.StatusBadRequest)
 			return
 		}
-		h.logger.Info("verification successful", zap.String("echostr", string(decrypted)))
+		h.logger.Info("verification successful")
 		w.Write(decrypted)
 	} else {
 		h.logger.Error("verification signature invalid")
@@ -104,8 +100,14 @@ type WeComMessage struct {
 }
 
 func (h *CallbackHandler) handleMessage(w http.ResponseWriter, r *http.Request, msgCh chan<- channel.Message) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		h.logger.Error("read body failed", zap.Error(err))
 		http.Error(w, "read body failed", http.StatusBadRequest)
 		return
@@ -113,28 +115,24 @@ func (h *CallbackHandler) handleMessage(w http.ResponseWriter, r *http.Request, 
 
 	h.logger.Info("callback message received",
 		zap.Int("body_len", len(body)),
-		zap.String("body_preview", string(body[:200])),
 	)
 
 	var encryptMsg struct {
 		Encrypt string `xml:"Encrypt"`
 	}
 	if err := xml.Unmarshal(body, &encryptMsg); err != nil {
-		h.logger.Error("parse xml failed", zap.Error(err), zap.ByteString("body", body))
+		h.logger.Error("parse xml failed", zap.Error(err))
 		http.Error(w, "parse xml failed", http.StatusBadRequest)
+		return
+	}
+	if encryptMsg.Encrypt == "" {
+		http.Error(w, "missing encrypted message", http.StatusBadRequest)
 		return
 	}
 
 	signature := r.URL.Query().Get("msg_signature")
 	timestamp := r.URL.Query().Get("timestamp")
 	nonce := r.URL.Query().Get("nonce")
-
-	h.logger.Info("callback message details",
-		zap.String("signature", signature),
-		zap.String("timestamp", timestamp),
-		zap.String("nonce", nonce),
-		zap.String("encrypt_len", encryptMsg.Encrypt),
-	)
 
 	if !h.crypto.VerifySignature(signature, timestamp, nonce, encryptMsg.Encrypt) {
 		h.logger.Error("signature verification failed")
@@ -149,11 +147,9 @@ func (h *CallbackHandler) handleMessage(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	h.logger.Info("message decrypted", zap.String("decrypted", string(decrypted)))
-
 	var msg WeComMessage
 	if err := xml.Unmarshal(decrypted, &msg); err != nil {
-		h.logger.Error("parse message failed", zap.Error(err), zap.ByteString("decrypted", decrypted))
+		h.logger.Error("parse message failed", zap.Error(err))
 		http.Error(w, "parse message failed", http.StatusBadRequest)
 		return
 	}
@@ -161,7 +157,6 @@ func (h *CallbackHandler) handleMessage(w http.ResponseWriter, r *http.Request, 
 	h.logger.Info("decoded wecom message",
 		zap.String("from_user", msg.FromUserName),
 		zap.String("msg_type", msg.MsgType),
-		zap.String("content", msg.Content),
 		zap.String("msg_id", msg.MsgId),
 	)
 
@@ -190,14 +185,10 @@ func (h *CallbackHandler) handleMessage(w http.ResponseWriter, r *http.Request, 
 		Timestamp: time.Unix(msg.CreateTime, 0),
 	}
 
-	msgCh <- chMsg
-	w.Write([]byte("success"))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	select {
+	case msgCh <- chMsg:
+		w.Write([]byte("success"))
+	case <-r.Context().Done():
+		return
 	}
-	return b
 }
-

@@ -78,12 +78,28 @@ func (m *Manager) Run(ctx context.Context, handler func(msg Message)) {
 
 	merged := make(chan Message, 100)
 	var wg sync.WaitGroup
+	var handlers sync.WaitGroup
+	defer func() {
+		wg.Wait()
+		handlers.Wait()
+	}()
 
 	for _, ch := range channels {
 		wg.Add(1)
 		go func(c Channel) {
 			defer wg.Done()
-			for msg := range c.Receive() {
+			inbound := c.Receive()
+			for {
+				var msg Message
+				select {
+				case <-ctx.Done():
+					return
+				case next, ok := <-inbound:
+					if !ok {
+						return
+					}
+					msg = next
+				}
 				select {
 				case merged <- msg:
 				case <-ctx.Done():
@@ -115,7 +131,11 @@ func (m *Manager) Run(ctx context.Context, handler func(msg Message)) {
 				zap.String("channel", msg.ChannelID),
 				zap.String("user", msg.UserID),
 			)
-			go handler(msg)
+			handlers.Add(1)
+			go func(msg Message) {
+				defer handlers.Done()
+				handler(msg)
+			}(msg)
 		}
 	}
 }

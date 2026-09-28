@@ -1,17 +1,20 @@
-﻿package memory
+package memory
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"go.uber.org/zap"
 	"github.com/yuanleyao/ai-agent/internal/vault"
+	"go.uber.org/zap"
 )
 
 // ── 什么是 TF-IDF？ ──
@@ -41,9 +44,10 @@ import (
 //
 // 记忆沉淀引擎 = 把对话变成笔记的流水线
 type Sedimenter struct {
-	personalVaultPath string           // personal-vault 根目录
+	mu                sync.Mutex
+	personalVaultPath string // personal-vault 根目录
 	logger            *zap.Logger
-	llmSummarizer     LLMSummarizer    // 调用 LLM 生成摘要的接口
+	llmSummarizer     LLMSummarizer // 调用 LLM 生成摘要的接口
 }
 
 // LLMSummarizer is the interface for generating structured summaries.
@@ -55,17 +59,17 @@ type LLMSummarizer interface {
 // StructuredSummary is the output of the LLM summarization step.
 // 结构化摘要 = 主题 + 关键决策 + 待跟进
 type StructuredSummary struct {
-	Title      string // 一句话概括
-	Decisions  string // 关键结论/发现
-	FollowUps  string // 待跟进事项
+	Title      string  // 一句话概括
+	Decisions  string  // 关键结论/发现
+	FollowUps  string  // 待跟进事项
 	Confidence float64 // 信心度 0-1
 }
 
 // SedimentConfig holds parameters for the sedimentation pipeline.
 type SedimentConfig struct {
-	MemoryDir     string  // _memory/ 的完整路径
+	MemoryDir      string  // _memory/ 的完整路径
 	DedupThreshold float64 // 去重阈值，默认 0.45
-	MinMessages   int     // 最少消息数才触发沉淀，默认 3
+	MinMessages    int     // 最少消息数才触发沉淀，默认 3
 }
 
 // DefaultSedimentConfig returns sensible defaults.
@@ -233,7 +237,7 @@ func (s *Sedimenter) dedupCheck(cfg SedimentConfig, summary *StructuredSummary) 
 	// 构建语料库（现有文档 + 新摘要）
 	corpus := make([]string, len(existing)+1)
 	for i, doc := range existing {
-		corpus[i] = doc
+		corpus[i] = doc.content
 	}
 	newDoc := summary.Title + " " + summary.Decisions + " " + summary.FollowUps
 	corpus[len(existing)] = newDoc
@@ -258,7 +262,7 @@ func (s *Sedimenter) dedupCheck(cfg SedimentConfig, summary *StructuredSummary) 
 	if bestSim >= cfg.DedupThreshold && bestIdx >= 0 {
 		return &dedupResult{
 			Similarity: bestSim,
-			MatchPath:  fmt.Sprintf("_memory/entry_%d.md", bestIdx),
+			MatchPath:  existing[bestIdx].path,
 			IsNew:      false,
 		}, nil
 	}
@@ -267,26 +271,67 @@ func (s *Sedimenter) dedupCheck(cfg SedimentConfig, summary *StructuredSummary) 
 }
 
 // loadExistingMemories reads all memory files from the _memory/ directory.
-func (s *Sedimenter) loadExistingMemories(memoryDir string) ([]string, error) {
-	if _, err := os.Stat(memoryDir); os.IsNotExist(err) {
-		return nil, nil // 目录不存在 = 没有已有记忆
-	}
+type storedMemory struct{ path, content string }
 
-	entries, err := os.ReadDir(memoryDir)
+func (s *Sedimenter) openMemoryDirectory(memoryDir string, create bool) (*os.Root, error) {
+	if s.personalVaultPath == "" {
+		return os.OpenRoot(memoryDir)
+	}
+	rel, err := filepath.Rel(s.personalVaultPath, memoryDir)
+	if err != nil || !filepath.IsLocal(rel) || (rel != "_memory" && !strings.HasPrefix(rel, "_memory"+string(filepath.Separator))) {
+		return nil, fmt.Errorf("memory directory must be inside personal-vault/_memory")
+	}
+	root, err := os.OpenRoot(s.personalVaultPath)
 	if err != nil {
-		return nil, fmt.Errorf("read memory dir: %w", err)
+		return nil, err
 	}
+	defer root.Close()
+	if create {
+		if err := root.MkdirAll(rel, 0700); err != nil {
+			return nil, err
+		}
+	}
+	return root.OpenRoot(rel)
+}
 
-	var docs []string
+func (s *Sedimenter) loadExistingMemories(memoryDir string) ([]storedMemory, error) {
+	dir, err := s.openMemoryDirectory(memoryDir, false)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer dir.Close()
+	f, err := dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	var docs []storedMemory
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(memoryDir, entry.Name()))
+		data, err := dir.ReadFile(entry.Name())
 		if err != nil {
 			continue
 		}
-		docs = append(docs, string(data))
+		page, err := vault.ParsePage(data)
+		if err != nil {
+			return nil, err
+		}
+		var lines []string
+		for _, line := range strings.Split(page.Body, "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				lines = append(lines, line)
+			}
+		}
+		docs = append(docs, storedMemory{path: filepath.Join(memoryDir, entry.Name()), content: strings.Join(lines, " ")})
 	}
 	return docs, nil
 }
@@ -314,17 +359,25 @@ func (s *Sedimenter) loadExistingMemories(memoryDir string) ([]string, error) {
 //	### 待跟进
 //	<未解决的问题>
 func (s *Sedimenter) WriteMemory(cfg SedimentConfig, conv *Conversation, summary *StructuredSummary, dedup *dedupResult) (string, error) {
-	// 确保 _memory/ 目录存在
-	if err := os.MkdirAll(cfg.MemoryDir, 0755); err != nil {
-		return "", fmt.Errorf("create memory dir: %w", err)
+	if !dedup.IsNew {
+		return dedup.MatchPath, nil
 	}
+	dir, err := s.openMemoryDirectory(cfg.MemoryDir, true)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
 
 	// 生成文件名：日期-时间-主题
 	slug := slugify(summary.Title)
-	if len(slug) > 50 {
-		slug = slug[:50]
+	if len([]rune(slug)) > 50 {
+		slug = string([]rune(slug)[:50])
 	}
-	filename := fmt.Sprintf("%s_%s.md", conv.EndedAt.Format("2006-01-02_1504"), slug)
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	filename := fmt.Sprintf("%s_%s_%x.md", conv.EndedAt.Format("2006-01-02_150405"), slug, nonce)
 	filePath := filepath.Join(cfg.MemoryDir, filename)
 
 	// 生成 frontmatter
@@ -335,7 +388,7 @@ func (s *Sedimenter) WriteMemory(cfg SedimentConfig, conv *Conversation, summary
 	}
 
 	content := fmt.Sprintf(`---
-title: "对话摘要：%s"
+title: %s
 created: %s
 source: %s
 tags: []
@@ -350,8 +403,8 @@ confidence: %.1f
 
 ### 待跟进
 %s
-`, summary.Title,
-		conv.EndedAt.Format("2006-01-02T15:04:05+08:00"),
+`, strconv.Quote("对话摘要："+summary.Title),
+		conv.EndedAt.Format(time.RFC3339),
 		source,
 		confidence,
 		summary.Title,
@@ -359,7 +412,16 @@ confidence: %.1f
 		summary.FollowUps,
 	)
 
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	f, err := dir.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", err
+	}
+	_, err = f.WriteString(content)
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return "", fmt.Errorf("write memory file: %w", err)
 	}
 
@@ -376,19 +438,29 @@ confidence: %.1f
 
 // SedimentationResult summarizes what happened during the sedimentation run.
 type SedimentationResult struct {
-	Worthy     bool                // 是否有值得记录的知识
-	Reason     string              // 判断理由
-	Summary    *StructuredSummary  // 生成的摘要（如果 worthy = true）
-	FilePath   string              // 写入的文件路径
-	IsNew      bool                // 是否为新知识（非去重合并）
-	Similarity float64             // 与已有记忆的最高相似度
-	Error      string              // 如果某步失败，这里记录错误
+	Worthy     bool               // 是否有值得记录的知识
+	Reason     string             // 判断理由
+	Summary    *StructuredSummary // 生成的摘要（如果 worthy = true）
+	FilePath   string             // 写入的文件路径
+	IsNew      bool               // 是否为新知识（非去重合并）
+	Similarity float64            // 与已有记忆的最高相似度
+	Error      string             // 如果某步失败，这里记录错误
 }
 
 // Process runs the full memory sedimentation pipeline on a completed conversation.
 // 运行完整的记忆沉淀流水线：判断 → 摘要 → 去重 → 写入
 func (s *Sedimenter) Process(ctx context.Context, cfg SedimentConfig, conv *Conversation) *SedimentationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result := &SedimentationResult{}
+	if conv == nil || len(conv.Messages) < cfg.MinMessages {
+		result.Reason = "not enough messages"
+		return result
+	}
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
 
 	// Step 1: Judge knowledge value.
 	worthy, reason := s.JudgeDecide(conv)
@@ -411,6 +483,10 @@ func (s *Sedimenter) Process(ctx context.Context, cfg SedimentConfig, conv *Conv
 		return result
 	}
 	result.Summary = summary
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
 
 	// Step 3: TF-IDF dedup.
 	dedup, err := s.dedupCheck(cfg, summary)
@@ -421,6 +497,10 @@ func (s *Sedimenter) Process(ctx context.Context, cfg SedimentConfig, conv *Conv
 	}
 	result.IsNew = dedup.IsNew
 	result.Similarity = dedup.Similarity
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
 
 	// Step 4: Write to _memory/.
 	filePath, err := s.WriteMemory(cfg, conv, summary, dedup)

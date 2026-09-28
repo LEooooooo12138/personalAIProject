@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Phase 1.4: Python Inference Service verification
 set -euo pipefail
 

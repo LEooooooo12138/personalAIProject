@@ -1,4 +1,4 @@
-﻿package vault
+package vault
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ import (
 //   If mtime matches → use cached tf data.
 //   If mtime differs → rebuild that document (and save on next cache write).
 
-const invertedCacheVersion = 1
+const invertedCacheVersion = 2
 
 // ── In-memory types ──
 
@@ -30,6 +30,7 @@ type docMeta struct {
 	title  string // frontmatter title (resolved at build time)
 	length int    // total token count
 	mtime  int64  // last modification time (Unix nanoseconds)
+	hash   string
 }
 
 // postingEntry is one entry in a term's posting list.
@@ -52,6 +53,7 @@ type docMetaJSON struct {
 	Title  string `json:"title"`
 	Length int    `json:"length"`
 	MTime  int64  `json:"mtime"`
+	Hash   string `json:"hash"`
 }
 
 type postingEntryJSON struct {
@@ -60,9 +62,9 @@ type postingEntryJSON struct {
 }
 
 type invertedIndexCache struct {
-	Version  int                         `json:"version"`
-	BuiltAt  int64                       `json:"built_at"`
-	Docs     []docMetaJSON               `json:"docs"`
+	Version  int                           `json:"version"`
+	BuiltAt  int64                         `json:"built_at"`
+	Docs     []docMetaJSON                 `json:"docs"`
 	Postings map[string][]postingEntryJSON `json:"postings"`
 }
 
@@ -77,7 +79,7 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
@@ -98,9 +100,10 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 			return nil
 		}
 
-		data, err := os.ReadFile(path)
+		relPath, _ := filepath.Rel(root, path)
+		data, err := readRootFile(root, relPath)
 		if err != nil {
-			return nil
+			return err
 		}
 
 		// Resolve frontmatter title.
@@ -122,12 +125,12 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 			})
 		}
 
-		relPath, _ := filepath.Rel(root, path)
 		idx.docs = append(idx.docs, docMeta{
 			path:   relPath,
 			title:  title,
 			length: len(docTok),
 			mtime:  info.ModTime().UnixNano(),
+			hash:   hashContent(string(data)),
 		})
 		totalLen += len(docTok)
 		return nil
@@ -146,6 +149,14 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 
 // SaveToFile serialises the index to a JSON file.
 func (idx *InvertedIndex) SaveToFile(path string) error {
+	data, err := idx.marshalCache()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func (idx *InvertedIndex) marshalCache() ([]byte, error) {
 	docs := make([]docMetaJSON, len(idx.docs))
 	for i, d := range idx.docs {
 		docs[i] = docMetaJSON{
@@ -153,6 +164,7 @@ func (idx *InvertedIndex) SaveToFile(path string) error {
 			Title:  d.title,
 			Length: d.length,
 			MTime:  d.mtime,
+			Hash:   d.hash,
 		}
 	}
 
@@ -172,14 +184,7 @@ func (idx *InvertedIndex) SaveToFile(path string) error {
 		Postings: postings,
 	}
 
-	data, err := json.MarshalIndent(cache, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal bm25 cache: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write bm25 cache: %w", err)
-	}
-	return nil
+	return json.Marshal(cache)
 }
 
 // LoadFromFile reads a serialised index from disk.
@@ -188,7 +193,10 @@ func (idx *InvertedIndex) LoadFromFile(path string) error {
 	if err != nil {
 		return err
 	}
+	return idx.loadCache(data)
+}
 
+func (idx *InvertedIndex) loadCache(data []byte) error {
 	var cache invertedIndexCache
 	if err := json.Unmarshal(data, &cache); err != nil {
 		return fmt.Errorf("parse bm25 cache: %w", err)
@@ -199,11 +207,15 @@ func (idx *InvertedIndex) LoadFromFile(path string) error {
 
 	idx.docs = make([]docMeta, len(cache.Docs))
 	for i, d := range cache.Docs {
+		if _, err := relativePath(d.Path); err != nil || d.Length < 0 {
+			return fmt.Errorf("invalid cached document")
+		}
 		idx.docs[i] = docMeta{
 			path:   d.Path,
 			title:  d.Title,
 			length: d.Length,
 			mtime:  d.MTime,
+			hash:   d.Hash,
 		}
 	}
 
@@ -212,6 +224,9 @@ func (idx *InvertedIndex) LoadFromFile(path string) error {
 	for term, entries := range cache.Postings {
 		pe := make([]postingEntry, len(entries))
 		for j, e := range entries {
+			if e.DocID < 0 || e.DocID >= len(idx.docs) || e.Freq <= 0 || idx.docs[e.DocID].length == 0 {
+				return fmt.Errorf("invalid cached posting")
+			}
 			pe[j] = postingEntry{docID: e.DocID, freq: e.Freq}
 		}
 		idx.postings[term] = pe
@@ -225,17 +240,15 @@ func (idx *InvertedIndex) LoadFromFile(path string) error {
 	return nil
 }
 
-// Validate checks each document's cached mtime against the filesystem.
-// Returns true if all documents are unchanged.
+// Validate compares the complete file set and content hashes.
 func (idx *InvertedIndex) Validate(root string) bool {
+	manifest, err := markdownFiles(root, systemFiles)
+	if err != nil || len(manifest) != len(idx.docs) {
+		return false
+	}
 	for _, doc := range idx.docs {
-		fullPath := filepath.Join(root, doc.path)
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			return false // file deleted or moved
-		}
-		if info.ModTime().UnixNano() != doc.mtime {
-			return false // file modified
+		if hash, ok := manifest[doc.path]; !ok || hash != doc.hash {
+			return false
 		}
 	}
 	return true

@@ -2,18 +2,15 @@ package core
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
-	"github.com/yuanleyao/ai-agent/internal/vault"
-	"github.com/yuanleyao/ai-agent/internal/chain"
 )
 
 type Agent struct {
@@ -30,11 +27,11 @@ type Agent struct {
 }
 
 type AgentDeps struct {
-	Config      *Config
-	Logger      *zap.Logger
-	SessionMgr  *SessionManager
-	Sedimenter  *memory.Sedimenter
-	FilterChain *filter.Chain
+	Config        *Config
+	Logger        *zap.Logger
+	SessionMgr    *SessionManager
+	Sedimenter    *memory.Sedimenter
+	FilterChain   *filter.Chain
 	ModelRouter   *ModelRouter
 	ChannelMgr    *channel.Manager
 	Infer         inference.Client
@@ -44,24 +41,34 @@ type AgentDeps struct {
 
 func NewAgent(deps AgentDeps) *Agent {
 	return &Agent{
-		cfg:         deps.Config,
-		logger:      deps.Logger,
-		sessionMgr:  deps.SessionMgr,
-		sedimenter:  deps.Sedimenter,
-		filterChain: deps.FilterChain,
-		modelRouter:      deps.ModelRouter,
-		chMgr:       deps.ChannelMgr,
-		infer:       deps.Infer,
+		cfg:           deps.Config,
+		logger:        deps.Logger,
+		sessionMgr:    deps.SessionMgr,
+		sedimenter:    deps.Sedimenter,
+		filterChain:   deps.FilterChain,
+		modelRouter:   deps.ModelRouter,
+		chMgr:         deps.ChannelMgr,
+		infer:         deps.Infer,
+		chainExecutor: deps.ChainExecutor,
+		chainRouter:   deps.ChainRouter,
 	}
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	a.logger.Info("agent main loop starting (phase2: full event loop)")
 	a.sessionMgr.Start(ctx)
-	go a.consumeSessionEnds(ctx)
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		a.consumeSessionEnds(ctx)
+	}()
 
 	// Blocks until ctx is cancelled
-	a.chMgr.Run(ctx, a.handleMessage)
+	a.chMgr.Run(ctx, func(msg channel.Message) { a.handleMessageContext(ctx, msg) })
+	cancel()
+	<-consumerDone
 
 	a.logger.Info("agent main loop stopping")
 	a.sessionMgr.Stop()
@@ -69,10 +76,18 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) handleMessage(msg channel.Message) {
+	a.handleMessageContext(context.Background(), msg)
+}
+
+func (a *Agent) handleMessageContext(ctx context.Context, msg channel.Message) {
+	ch, err := a.chMgr.Get(msg.ChannelID)
+	if err != nil {
+		a.logger.Error("channel lookup failed", zap.Error(err))
+		return
+	}
 	a.logger.Info("handling message",
 		zap.String("channel", msg.ChannelID),
 		zap.String("user", msg.UserID),
-		zap.String("content", vault.Truncate(msg.Content, 100)),
 	)
 
 	session, err := a.sessionMgr.GetOrCreate(msg.ChannelID, msg.UserID)
@@ -88,7 +103,11 @@ func (a *Agent) handleMessage(msg channel.Message) {
 	}); !ok {
 		a.logger.Warn("session round limit reached", zap.String("session", session.ID))
 		a.sessionMgr.EndSession(session)
-		return
+		session, err = a.sessionMgr.GetOrCreate(msg.ChannelID, msg.UserID)
+		if err != nil || !a.sessionMgr.AddMessage(session, Message{Role: "user", Content: msg.Content, Timestamp: msg.Timestamp}) {
+			a.sendFailure(ch, msg)
+			return
+		}
 	}
 
 	metadata := msg.Metadata
@@ -97,41 +116,37 @@ func (a *Agent) handleMessage(msg channel.Message) {
 	}
 	var responseText string
 	if a.chainExecutor != nil && a.chainRouter != nil {
-		state := chain.NewChainState(msg.Content, "personal", metadata)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), a.cfg.Inference.Timeout)
+		vaultName := "personal"
+		if ch.Type() == channel.External {
+			vaultName = "agent"
+		}
+		state := chain.NewChainState(msg.Content, vaultName, metadata)
+		clone := CloneSession(session)
+		history := make([]map[string]string, 0, len(clone.Messages))
+		for _, m := range clone.Messages[:len(clone.Messages)-1] {
+			history = append(history, map[string]string{"role": m.Role, "content": m.Content})
+		}
+		state.Data["conversation_history"] = history
+		ctx2, cancel2 := context.WithTimeout(ctx, a.cfg.Inference.Timeout)
 		result, err := a.chainExecutor.Run(ctx2, "chat", state)
 		cancel2()
-		if err != nil {
+		if err == nil && result != nil {
+			err = result.Error
+		}
+		if err != nil || result == nil {
 			a.logger.Error("chain error", zap.Error(err))
+			a.sendFailure(ch, msg)
 			return
 		}
 		responseText = result.FinalAnswer
 		if responseText == "" {
 			a.logger.Warn("chain produced empty response")
+			a.sendFailure(ch, msg)
 			return
 		}
 	} else {
-		decision := a.modelRouter.Decide(nil, "", metadata)
-		reqBody := buildChatRequest(decision.TargetModel, msg.Content)
-		inferCtx, cancel := context.WithTimeout(context.Background(), a.cfg.Inference.Timeout)
-		defer cancel()
-
-		rawResp, err := a.infer.Chat(inferCtx, json.RawMessage(reqBody))
-		if err != nil {
-			a.logger.Error("llm error", zap.Error(err))
-			return
-		}
-
-		responseText, err = extractResponseContent(rawResp)
-		if err != nil {
-			a.logger.Error("parse response failed", zap.Error(err))
-			return
-		}
-	}
-
-	ch, err := a.chMgr.Get(msg.ChannelID)
-	if err != nil {
-		a.logger.Error("channel lookup failed", zap.Error(err))
+		a.logger.Error("chain system not initialized, cannot handle message")
+		a.sendFailure(ch, msg)
 		return
 	}
 
@@ -154,32 +169,10 @@ func (a *Agent) handleMessage(msg channel.Message) {
 	}
 }
 
-func buildChatRequest(model, content string) []byte {
-	req := map[string]interface{}{
-		"model": model,
-		"messages": []map[string]string{
-			{"role": "user", "content": content},
-		},
+func (a *Agent) sendFailure(ch channel.Channel, msg channel.Message) {
+	if err := ch.Send(msg, channel.Response{Content: "暂时无法生成回复，请稍后重试。", Metadata: map[string]string{"error": "generation_failed"}}); err != nil {
+		a.logger.Warn("error response failed", zap.Error(err))
 	}
-	data, _ := json.Marshal(req)
-	return data
-}
-
-func extractResponseContent(raw json.RawMessage) (string, error) {
-	var resp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
-	}
-	return resp.Choices[0].Message.Content, nil
 }
 
 func (a *Agent) consumeSessionEnds(ctx context.Context) {
@@ -191,8 +184,18 @@ func (a *Agent) consumeSessionEnds(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case session := <-a.sessionMgr.EndChan():
+			if a.sedimenter == nil {
+				a.sessionMgr.CompleteSession(session)
+				continue
+			}
 			conv := sessionToConversation(session)
 			cfg := memory.DefaultSedimentConfig(a.cfg.Vaults.Personal)
+			if a.cfg.Memory.DedupThreshold > 0 {
+				cfg.DedupThreshold = a.cfg.Memory.DedupThreshold
+			}
+			if a.cfg.Memory.MinMessages > 0 {
+				cfg.MinMessages = a.cfg.Memory.MinMessages
+			}
 			result := a.sedimenter.Process(ctx, cfg, conv)
 			if result.Error != "" {
 				a.logger.Warn("sedimentation had errors", zap.String("error", result.Error))
@@ -220,4 +223,3 @@ func sessionToConversation(s *Session) *memory.Conversation {
 		EndedAt:   clone.LastActiveAt,
 	}
 }
-

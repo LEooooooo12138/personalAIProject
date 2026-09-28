@@ -1,9 +1,8 @@
-﻿package chain
+package chain
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -53,6 +52,10 @@ func (s *VaultWriteStep) Run(ctx context.Context, state *ChainState) error {
 	}
 
 	category := inferCategory(wikiOutput, title)
+	allowed := map[string]bool{"concepts": true, "entities": true, "skills": true, "references": true, "projects": true, "journal": true, "synthesis": true}
+	if !allowed[category] {
+		return fmt.Errorf("unsupported wiki category %q", category)
+	}
 	slug := slugifyTitle(title)
 	relPath := filepath.Join(category, slug+".md")
 
@@ -78,11 +81,11 @@ func (s *VaultWriteStep) Run(ctx context.Context, state *ChainState) error {
 
 // IndexUpdateStep updates index.md with an entry for a newly written page.
 type IndexUpdateStep struct {
-	writer     vault.Writer
-	reader     vault.Reader
+	writer       vault.Writer
+	reader       vault.Reader
 	personalPath string
 	agentPath    string
-	logger     *zap.Logger
+	logger       *zap.Logger
 }
 
 // NewIndexUpdateStep creates a step that updates the vault index.
@@ -119,7 +122,7 @@ func (s *IndexUpdateStep) Run(ctx context.Context, state *ChainState) error {
 	}
 
 	for _, entry := range existing {
-		if entry.Path == path || entry.Title == title {
+		if filepath.Clean(entry.Path) == filepath.Clean(path) {
 			s.logger.Debug("index-update: entry already exists, skipping",
 				zap.String("title", title),
 			)
@@ -127,21 +130,12 @@ func (s *IndexUpdateStep) Run(ctx context.Context, state *ChainState) error {
 		}
 	}
 
-	// Append to index.md.
-	entry := fmt.Sprintf("[%s](%s)", title, path)
-	if err := s.writer.AppendLog(ctx, vaultName, "- "+entry); err != nil {
-		// AppendLog writes to log.md, not index.md. We need a different approach.
-		// Let's append directly to index.md for now.
-		vp := s.vaultPath(vaultName)
-		indexPath := filepath.Join(vp, "index.md")
-		f, err := os.OpenFile(indexPath, os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			return fmt.Errorf("open index.md: %w", err)
-		}
-		defer f.Close()
-		if _, err := fmt.Fprintf(f, "\n- [%s](%s)", title, path); err != nil {
-			return fmt.Errorf("write index.md: %w", err)
-		}
+	iw, ok := s.writer.(vault.IndexWriter)
+	if !ok {
+		return fmt.Errorf("vault writer does not support index updates")
+	}
+	if err := iw.UpdateIndex(ctx, vaultName, vault.IndexEntry{Title: title, Path: path}); err != nil {
+		return fmt.Errorf("update index: %w", err)
 	}
 
 	s.logger.Info("index updated",

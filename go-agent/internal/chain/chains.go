@@ -165,6 +165,9 @@ type ChainDeps struct {
 	AgentPath       string
 	Logger          *zap.Logger
 	TriggerEntities []string
+	RRFK            int
+	TopK            int
+	MaxChunkChars   int
 }
 
 func BuildAllChains(deps ChainDeps) (*ChainRouter, error) {
@@ -211,6 +214,27 @@ func BuildAllChains(deps ChainDeps) (*ChainRouter, error) {
 		return nil, err
 	}
 	mergeRouters(router, clRouter)
+	for _, c := range router.routes {
+		for _, step := range c.Steps {
+			switch s := step.(type) {
+			case *VaultSearchStep:
+				if deps.RRFK > 0 {
+					s.rrfK = deps.RRFK
+				}
+				if deps.TopK > 0 {
+					s.maxResults = deps.TopK
+				}
+			case *PagePreprocessStep:
+				if deps.MaxChunkChars > 0 {
+					s.maxBodyLen = deps.MaxChunkChars
+				}
+			case *ContextAssemblyStep:
+				if deps.TopK > 0 {
+					s.maxSources = deps.TopK
+				}
+			}
+		}
+	}
 
 	return router, nil
 }
@@ -222,18 +246,32 @@ func mergeRouters(dst, src *ChainRouter) {
 }
 
 type EmbeddingStoreAdapter struct {
-	searchFn func(ctx context.Context, query string, k int) ([]EmbeddingHit, error)
+	searchFn func(ctx context.Context, query string, k int) ([]vault.EmbeddingResult, error)
 }
 
 func NewEmbeddingStoreAdapter(
-	searchFn func(ctx context.Context, query string, k int) ([]EmbeddingHit, error),
+	searchFn func(ctx context.Context, query string, k int) ([]vault.EmbeddingResult, error),
 ) *EmbeddingStoreAdapter {
 	return &EmbeddingStoreAdapter{searchFn: searchFn}
 }
 
-func (a *EmbeddingStoreAdapter) Search(ctx context.Context, query string, k int) ([]EmbeddingHit, error) {
+func (a *EmbeddingStoreAdapter) Search(ctx context.Context, query string, k int) ([]vault.EmbeddingResult, error) {
 	if a.searchFn == nil {
 		return nil, nil
 	}
 	return a.searchFn(ctx, query, k)
+}
+
+type VaultEmbeddingStoreAdapter struct {
+	searchFn func(context.Context, string, string, int) ([]vault.EmbeddingResult, error)
+}
+
+func NewVaultEmbeddingStoreAdapter(fn func(context.Context, string, string, int) ([]vault.EmbeddingResult, error)) *VaultEmbeddingStoreAdapter {
+	return &VaultEmbeddingStoreAdapter{searchFn: fn}
+}
+func (a *VaultEmbeddingStoreAdapter) Search(ctx context.Context, query string, k int) ([]vault.EmbeddingResult, error) {
+	return a.SearchVault(ctx, "personal", query, k)
+}
+func (a *VaultEmbeddingStoreAdapter) SearchVault(ctx context.Context, vaultName, query string, k int) ([]vault.EmbeddingResult, error) {
+	return a.searchFn(ctx, vaultName, query, k)
 }
