@@ -27,6 +27,9 @@ func validIDs(ids []string) bool {
 func (s *Store) GetSharing() (Sharing, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return Sharing{}, err
+	}
 	if !s.initialized {
 		return Sharing{}, ErrUninitialized
 	}
@@ -34,11 +37,14 @@ func (s *Store) GetSharing() (Sharing, error) {
 }
 
 func (s *Store) PutSharing(expectedRevision uint64, entities, suggestions []string) (Sharing, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return Sharing{}, err
+	}
 	if !validIDs(entities) || !validIDs(suggestions) {
 		return Sharing{}, ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.initialized {
 		return Sharing{}, ErrUninitialized
 	}
@@ -50,5 +56,5 @@ func (s *Store) PutSharing(expectedRevision uint64, entities, suggestions []stri
 	if err := s.commitLocked(st); err != nil {
 		return Sharing{}, err
 	}
-	return st.Sharing, nil
+	return Sharing{Revision: st.Sharing.Revision, EntityIDs: append([]string{}, st.Sharing.EntityIDs...), SuggestionIDs: append([]string{}, st.Sharing.SuggestionIDs...)}, nil
 }

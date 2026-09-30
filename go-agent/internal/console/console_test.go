@@ -166,6 +166,35 @@ func TestSharingRevisionConflict(t *testing.T) {
 	}
 }
 
+func TestPutSharingResultCannotMutateCommittedPolicy(t *testing.T) {
+	s, dir := newTestStore(t)
+	bootstrapTest(t, s)
+	written, err := s.PutSharing(0, []string{"light.kitchen"}, []string{"suggestion-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	written.EntityIDs[0] = "light.private"
+	written.SuggestionIDs[0] = "suggestion-private"
+	current, err := s.GetSharing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.EntityIDs[0] != "light.kitchen" || current.SuggestionIDs[0] != "suggestion-1" || current.Revision != 1 {
+		t.Fatalf("caller changed live policy: %+v", current)
+	}
+	reopened, err := OpenStore(dir, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := reopened.GetSharing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.EntityIDs[0] != "light.kitchen" || after.SuggestionIDs[0] != "suggestion-1" || after.Revision != 1 {
+		t.Fatalf("caller changed disk policy: %+v", after)
+	}
+}
+
 func TestFailedWritePreservesSessionAndBoundRequest(t *testing.T) {
 	s, dir := newTestStore(t)
 	bootstrapTest(t, s)
@@ -188,6 +217,9 @@ func TestFailedWritePreservesSessionAndBoundRequest(t *testing.T) {
 	}
 	if err := s.Logout(login.Token); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("failed persistence: %v", err)
+	}
+	if err := s.CheckAvailable(); err != nil {
+		t.Fatalf("pre-replacement failure poisoned store: %v", err)
 	}
 	if _, err := s.Resolve(login.Token); err != nil {
 		t.Fatalf("session revoked before successful write: %v", err)

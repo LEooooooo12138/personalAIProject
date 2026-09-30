@@ -18,6 +18,9 @@ func csrfToken(token string) string {
 func (s *Store) Bootstrap(username, displayName, password string) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return User{}, err
+	}
 	if s.initialized {
 		return User{}, ErrConflict
 	}
@@ -51,6 +54,10 @@ func (s *Store) Authenticate(username, password string) (Login, error) {
 		name = ""
 	}
 	s.mu.Lock()
+	if err := s.checkAvailableLocked(); err != nil {
+		s.mu.Unlock()
+		return Login{}, err
+	}
 	if !s.initialized {
 		s.mu.Unlock()
 		return Login{}, ErrUninitialized
@@ -84,6 +91,9 @@ func (s *Store) Authenticate(username, password string) (Login, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return Login{}, err
+	}
 	i, ok := s.findUser(candidate.ID)
 	if !ok || s.state.Users[i].Disabled || s.state.Users[i].PasswordHash != candidate.PasswordHash {
 		return Login{}, ErrUnauthenticated
@@ -98,6 +108,9 @@ func (s *Store) Authenticate(username, password string) (Login, error) {
 }
 
 func (s *Store) resolveLocked(token string) (Principal, session, error) {
+	if err := s.checkAvailableLocked(); err != nil {
+		return Principal{}, session{}, err
+	}
 	if !s.initialized {
 		return Principal{}, session{}, ErrUninitialized
 	}
@@ -174,11 +187,14 @@ func (s *Store) Logout(token string) error {
 }
 
 func (s *Store) ChangePassword(token, oldPassword, newPassword string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return err
+	}
 	if !validPassword(newPassword) {
 		return ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	p, _, err := s.resolveLocked(token)
 	if err != nil {
 		return err
@@ -245,6 +261,9 @@ func (s *Store) BindSession(ctx context.Context, token string) (context.Context,
 func (s *Store) RevokeAllSessions() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return err
+	}
 	if !s.initialized {
 		return ErrUninitialized
 	}
@@ -258,12 +277,15 @@ func (s *Store) RevokeAllSessions() error {
 }
 
 func (s *Store) CreateMember(username, displayName string) (User, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return User{}, "", err
+	}
 	name, err := normalizeUsername(username)
 	if err != nil || !validDisplayName(displayName) {
 		return User{}, "", ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.initialized {
 		return User{}, "", ErrUninitialized
 	}
@@ -294,11 +316,14 @@ func (s *Store) CreateMember(username, displayName string) (User, string, error)
 }
 
 func (s *Store) UpdateMember(id, displayName string, disabled bool) (User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return User{}, err
+	}
 	if !validDisplayName(displayName) {
 		return User{}, ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.initialized {
 		return User{}, ErrUninitialized
 	}
@@ -325,6 +350,9 @@ func (s *Store) UpdateMember(id, displayName string, disabled bool) (User, error
 func (s *Store) ResetMemberPassword(id string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return "", err
+	}
 	if !s.initialized {
 		return "", ErrUninitialized
 	}
@@ -355,11 +383,14 @@ func (s *Store) ResetMemberPassword(id string) (string, error) {
 }
 
 func (s *Store) ResetAdminPassword(password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return err
+	}
 	if !validPassword(password) {
 		return ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.initialized {
 		return ErrUninitialized
 	}
@@ -385,6 +416,9 @@ func (s *Store) ResetAdminPassword(password string) error {
 func (s *Store) ListMembers() ([]User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.checkAvailableLocked(); err != nil {
+		return nil, err
+	}
 	if !s.initialized {
 		return nil, ErrUninitialized
 	}
