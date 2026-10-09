@@ -105,3 +105,15 @@ WS聊天输入新增可选`request_id`；新前端每次用户主动发送生成
 HA WS提供认证/请求关联等基础，但现有REST有界回读足以交付首版。[HA WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
 
 Ollama提供结构化输出机制；这只约束输出格式，服务端仍须核验实体/权限/动作，并验证本机兼容端点。[Ollama Structured Outputs](https://docs.ollama.com/capabilities/structured-outputs)
+
+
+## 2026-10-09 实施补充
+
+本轮 M1 工程实现及验证见[验收记录](../../console-ha-control-results.md)。微信等外部入口仍暂缓。
+
+- 控制配置采用 `smarthome.control.enabled` 显式开关，默认 false，targets 默认空；启用依赖 Console 与 HA。
+- 意图解析独立于通用 chain，通过 Console dispatch 接入原 RAG；解析器无写入依赖。配置的实际负载名称覆盖同实体目录控制器名称，人工别名最多8个，UTF-8字节上限与候选校验一致。
+- REST 确认直接返回最新提议，当前实现不额外广播 control_result；WS仅需消费终态提议/查询事件。
+- 重连重发在会话轮数切换前查原 owner/session/request，并比对原输入SHA-256摘要；同ID改变文本返回冲突，不通过重新解析生成另一动作。
+- 浏览器丢失确认响应后先GET当前提议；仅服务端unknown才允许只读核对，不因客户端unknown重发HA写入。
+- 固定设备允许列表不用于解决名称歧义；名称唯一性必须覆盖所有可见查询候选。

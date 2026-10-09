@@ -1,0 +1,36 @@
+{
+  "case_id": "zh-02",
+  "completion_tokens": 512,
+  "content_bytes": 59,
+  "error_code": "HA intent is invalid or ambiguous",
+  "finish_reason": "length",
+  "ha_writes": 0,
+  "latency_ms": 6443.683,
+  "max_tokens": 512,
+  "mode": "synthetic_single_case_diagnostic",
+  "model_digest": "4eb23ef187e2c5462566d6a1d3bbbc2f1346d0b4327cbb66d58fffbcc9b2b05c",
+  "model_intent": null,
+  "model_tag": "gemma4:12b",
+  "model_thinking_default": true,
+  "model_thinking_values": [
+    false,
+    true
+  ],
+  "observed": {
+    "kind": "",
+    "entity_id": "",
+    "action": "",
+    "question": ""
+  },
+  "prompt_tokens": 722,
+  "prompt_version": "ha-intent-v1",
+  "query": "现在湿度是多少",
+  "reasoning_bytes": 1664,
+  "reasoning_effort_override": "",
+  "reference": "https://docs.ollama.com/api/openai-compatibility",
+  "rejection_stage": "completion_envelope",
+  "request_accepted": true,
+  "schema_shaped": false,
+  "schema_version": "ha_intent_v1",
+  "temperature": 0
+}
