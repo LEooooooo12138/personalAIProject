@@ -36,12 +36,12 @@ func (c *ControlChat) Handle(ctx context.Context, actor smarthome.ControlActor, 
 	}
 	candidates := chain.HACandidates{}
 	for _, t := range qs {
-		candidates.Query = append(candidates.Query, chain.HATarget{EntityID: t.EntityID, Name: t.Name, AreaName: t.AreaName, Domain: t.Domain})
+		candidates.Query = append(candidates.Query, chain.HATarget{EntityID: t.EntityID, Name: t.Name, AreaName: t.AreaName, Domain: t.Domain, Aliases: append([]string(nil), t.Aliases...)})
 	}
 	for _, t := range cs {
 		candidates.Control = append(candidates.Control, chain.HATarget{EntityID: t.EntityID, Name: t.Name, AreaName: t.AreaName, Domain: t.Domain, Aliases: t.Aliases})
 	}
-	// Verified load names take precedence over registry controller names for shared IDs.
+	// Keep read and write candidate metadata identical for shared IDs.
 	for i, q := range candidates.Query {
 		for _, target := range candidates.Control {
 			if q.EntityID == target.EntityID {

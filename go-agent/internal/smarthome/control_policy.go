@@ -118,19 +118,36 @@ func (s *ControlService) Candidates(ctx context.Context, query string) ([]QueryT
 		return nil, nil, ErrControlUnavailable
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
-	queries := []QueryTarget{}
-	controls := []ControlTarget{}
+	named := []QueryTarget{}
+	areaOnly := []QueryTarget{}
 	for _, v := range snap.QueryTargets() {
 		target, ok := s.targets[v.EntityID]
-		names := []string{v.EntityID, v.Name, v.AreaName, v.AreaName + v.Name}
+		names := []string{v.EntityID, v.Name}
+		areas := []string{v.AreaName}
 		if ok {
-			names = append(names, target.Name, target.AreaName, target.AreaName+target.Name)
+			names = append(names, target.Name)
 			names = append(names, target.Aliases...)
+			areas = append(areas, target.AreaName)
+			// A stale directory still retains configured read-only identity. Only
+			// the fresh/connected check below grants a control candidate.
+			v.Name, v.AreaName = target.Name, target.AreaName
+			v.Aliases = append([]string{}, target.Aliases...)
 		}
-		if !controlMatch(q, names...) {
-			continue
+		if controlMatch(q, names...) {
+			named = append(named, v)
+		} else if controlMatch(q, areas...) {
+			areaOnly = append(areaOnly, v)
 		}
-		queries = append(queries, v)
+	}
+	// Keep every named match, including read-only duplicates and multiple named
+	// targets. Room-only matches cannot crowd an explicit reference out of bounds.
+	queries := named
+	if len(queries) == 0 {
+		queries = areaOnly
+	}
+	controls := []ControlTarget{}
+	for _, v := range queries {
+		target, ok := s.targets[v.EntityID]
 		if ok && snap.Meta.Freshness == "fresh" && snap.Meta.Connection == "connected" {
 			controls = append(controls, cloneControlTarget(target))
 		}

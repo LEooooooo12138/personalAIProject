@@ -14,10 +14,11 @@ type ControlIntent struct {
 	Action    string `json:"action"`
 }
 type QueryTarget struct {
-	EntityID string `json:"entity_id"`
-	Name     string `json:"name"`
-	AreaName string `json:"area_name"`
-	Domain   string `json:"domain"`
+	EntityID string   `json:"entity_id"`
+	Name     string   `json:"name"`
+	AreaName string   `json:"area_name"`
+	Domain   string   `json:"domain"`
+	Aliases  []string `json:"aliases,omitempty"`
 }
 type ControlTarget struct {
 	EntityID             string   `json:"entity_id" yaml:"entity_id"`

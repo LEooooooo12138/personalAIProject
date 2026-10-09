@@ -257,7 +257,11 @@ func validateHAIntent(intent HAIntent, query string, candidates HACandidates) er
 			return ErrHAIntentInvalid
 		}
 	case "query":
-		if intent.Action != "" || intent.Question != "" || !haHasTarget(candidates.Query, intent.EntityID) {
+		visible := haVisibleTargets(candidates)
+		if intent.Action != "" || intent.Question != "" || !haHasTarget(candidates.Query, intent.EntityID) || !haControlReference(query, intent.EntityID, visible) {
+			return ErrHAIntentInvalid
+		}
+		if !haQueryReferencesSingleTarget(query, intent.EntityID, visible) {
 			return ErrHAIntentInvalid
 		}
 	case "on_off":
@@ -358,7 +362,7 @@ func scanHAJSONValue(decoder *json.Decoder, depth int) error {
 	return nil
 }
 
-// Control proposals require a literal public name or entity ID. A repeated name
+// Device queries and control proposals require a literal public name or entity ID. A repeated name
 // or alias requires a unique literal room; aliases must be supplied by the server.
 func haControlReference(query, id string, targets []HATarget) bool {
 	for _, target := range targets {
@@ -458,4 +462,62 @@ func haVisibleTargets(candidates HACandidates) []HATarget {
 		}
 	}
 	return visible
+}
+
+// Count literal reference groups, including labels that are too ambiguous for
+// haControlReference to resolve. Overlapping names form one group, so a shorter
+// name inside the selected full name is not a second device. Room disambiguation
+// of a shared label remains valid when that is the only reference in the query.
+func haQueryReferencesSingleTarget(query, selectedID string, targets []HATarget) bool {
+	type reference struct {
+		end, selectedEnd, otherEnd int
+	}
+	// Memory is bounded by the input length, even for many overlapping aliases.
+	references := make([]reference, len(query))
+	for _, target := range targets {
+		labels := append([]string{target.EntityID, target.Name}, target.Aliases...)
+		for index, label := range labels {
+			if label == "" {
+				continue
+			}
+			for offset := 0; offset < len(query); {
+				relative := strings.Index(query[offset:], label)
+				if relative < 0 {
+					break
+				}
+				start := offset + relative
+				end := start + len(label)
+				offset = start + 1
+				if index == 0 && ((start > 0 && haEntityByte(query[start-1])) || (end < len(query) && haEntityByte(query[end]))) {
+					continue
+				}
+				ref := &references[start]
+				ref.end = max(ref.end, end)
+				if target.EntityID == selectedID {
+					ref.selectedEnd = max(ref.selectedEnd, end)
+				} else {
+					ref.otherEnd = max(ref.otherEnd, end)
+				}
+			}
+		}
+	}
+	groups, hasAmbiguity := 0, false
+	for start := 0; start < len(references); start++ {
+		ref := references[start]
+		if ref.end == 0 {
+			continue
+		}
+		for next := start + 1; next < ref.end; next++ {
+			ref.end = max(ref.end, references[next].end)
+		}
+		// The selected literal must cover the whole group, not just a substring
+		// of another candidate's longer name.
+		if ref.selectedEnd < ref.end {
+			return false
+		}
+		groups++
+		hasAmbiguity = hasAmbiguity || ref.otherEnd == ref.end
+		start = ref.end - 1
+	}
+	return groups > 0 && (groups == 1 || !hasAmbiguity)
 }

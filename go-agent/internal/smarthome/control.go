@@ -59,7 +59,11 @@ func (s *ControlService) Query(ctx context.Context, id string) (*DeviceQueryResu
 	}
 	for _, t := range snap.QueryTargets() {
 		if t.EntityID == id {
-			v, _, e := s.read(ctx, id, t.Name)
+			name := t.Name
+			if target, ok := s.targets[id]; ok {
+				name = target.Name
+			}
+			v, _, e := s.read(ctx, id, name)
 			return v, e
 		}
 	}
