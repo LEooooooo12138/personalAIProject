@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -319,9 +320,12 @@ func (s *Sedimenter) loadExistingMemories(memoryDir string) ([]storedMemory, err
 		}
 		data, err := dir.ReadFile(entry.Name())
 		if err != nil {
-			continue
+			return nil, err
 		}
 		page, err := vault.ParsePage(data)
+		if errors.Is(err, vault.ErrInvalidFrontmatter) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

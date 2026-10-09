@@ -20,10 +20,12 @@ type Config struct {
 	Logging     LoggingConfig
 	Channels    ChannelsConfig
 	SmartHome   SmartHomeConfig
+	Console     ConsoleConfig
 }
 
 type ServerConfig struct {
 	Port            int           `mapstructure:"port"`
+	ListenAddress   string        `mapstructure:"listen_address"`
 	InternalKey     string        `mapstructure:"internal_key"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 	ChainTimeout    time.Duration `mapstructure:"chain_timeout"`
@@ -84,11 +86,14 @@ type ChannelsConfig struct {
 
 // SmartHomeConfig holds Home Assistant connection and automation settings.
 type SmartHomeConfig struct {
-	Enabled         bool   `mapstructure:"enabled"`
-	BaseURL         string `mapstructure:"base_url"`
-	Token           string `mapstructure:"token"`
-	PollIntervalSec int    `mapstructure:"poll_interval_sec"`
-	AnalysisHour    int    `mapstructure:"analysis_hour"`
+	OAuthCredentialsFile string `mapstructure:"oauth_credentials_file"`
+	Enabled              bool   `mapstructure:"enabled"`
+	BaseURL              string `mapstructure:"base_url"`
+	Token                string `mapstructure:"token"`
+	PollIntervalSec      int    `mapstructure:"poll_interval_sec"`
+	AnalysisHour         int    `mapstructure:"analysis_hour"`
+	// TimeZone optionally checks HA's authoritative time zone; it never overrides it.
+	TimeZone string `mapstructure:"time_zone"`
 	// AgentVaultPath is where rule documents and reports are written.
 	AgentVaultPath string `mapstructure:"agent_vault_path"`
 }
@@ -177,6 +182,9 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Memory.MinMessages == 0 {
 		cfg.Memory.MinMessages = 3
 	}
+	if cfg.SmartHome.Token != "" && cfg.SmartHome.OAuthCredentialsFile != "" {
+		return nil, fmt.Errorf("config: choose smarthome token or OAuth credentials, not both")
+	}
 	if cfg.SmartHome.PollIntervalSec == 0 {
 		cfg.SmartHome.PollIntervalSec = 3600
 	}
@@ -187,5 +195,8 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.SmartHome.AgentVaultPath = cfg.Vaults.Agent + "/smart-home"
 	}
 
+	if err := cfg.ValidateConsole(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }

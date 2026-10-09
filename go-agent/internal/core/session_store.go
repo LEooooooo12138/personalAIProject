@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,11 +31,15 @@ import (
 
 // SessionStore adds persistence and vector search to session management.
 type SessionStore struct {
-	mgr         *SessionManager
-	sessionsDir string
-	cachePath   string
-	infer       Embedder
-	logger      *zap.Logger
+	mgr            *SessionManager
+	sessionsDir    string
+	cachePath      string
+	infer          Embedder
+	logger         *zap.Logger
+	initErr        error
+	saveMu         sync.Mutex
+	writeSession   func(*os.File, []byte) (int, error)
+	replaceSession func(string, string) error
 
 	// Vector index
 	mu       sync.RWMutex
@@ -82,20 +87,38 @@ type SessionHit struct {
 // NewSessionStore creates a session store with persistence and vector search.
 // sessionsDir is typically {agentVault}/_sessions/.
 func NewSessionStore(mgr *SessionManager, sessionsDir string, infer Embedder, logger *zap.Logger) *SessionStore {
-	os.MkdirAll(sessionsDir, 0755)
+	initErr := os.MkdirAll(sessionsDir, 0700)
 	return &SessionStore{
-		mgr:         mgr,
-		sessionsDir: sessionsDir,
-		cachePath:   filepath.Join(sessionsDir, "embeddings.json"),
-		infer:       infer,
-		logger:      logger,
-		messages:    make([]sessionMessage, 0),
+		initErr:        initErr,
+		writeSession:   (*os.File).Write,
+		replaceSession: os.Rename,
+		mgr:            mgr,
+		sessionsDir:    sessionsDir,
+		cachePath:      filepath.Join(sessionsDir, "embeddings.json"),
+		infer:          infer,
+		logger:         logger,
+		messages:       make([]sessionMessage, 0),
 	}
 }
 
 // Initialize loads persisted sessions from disk and rebuilds the vector index.
 // Must be called once at startup.
 func (ss *SessionStore) Initialize(ctx context.Context) error {
+	if ss.initErr != nil {
+		return fmt.Errorf("create sessions directory: %w", ss.initErr)
+	}
+	probe, err := os.CreateTemp(ss.sessionsDir, ".session-probe-*")
+	if err != nil {
+		return fmt.Errorf("sessions directory not writable: %w", err)
+	}
+	name := probe.Name()
+	if err := probe.Close(); err != nil {
+		os.Remove(name)
+		return fmt.Errorf("close session probe: %w", err)
+	}
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("remove session probe: %w", err)
+	}
 	// Load sessions from disk.
 	entries, err := os.ReadDir(ss.sessionsDir)
 	if err != nil {
@@ -142,6 +165,11 @@ func (ss *SessionStore) Initialize(ctx context.Context) error {
 
 // SaveSession persists a single session to disk.
 func (ss *SessionStore) SaveSession(s *Session) error {
+	ss.saveMu.Lock()
+	defer ss.saveMu.Unlock()
+	if ss.initErr != nil {
+		return fmt.Errorf("sessions directory unavailable: %w", ss.initErr)
+	}
 	clone := CloneSession(s)
 	sf := sessionFile{
 		ID:           clone.ID,
@@ -159,11 +187,46 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 		return fmt.Errorf("marshal session: %w", err)
 	}
 
-	// Sanitize filename: replace ":" with "_"
 	filename := sessionFilename(sf.ID)
 	path := filepath.Join(ss.sessionsDir, filename)
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	f, err := os.CreateTemp(ss.sessionsDir, ".session-*")
+	if err != nil {
+		return fmt.Errorf("create session file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return fmt.Errorf("session mode: %w", err)
+	}
+	n, err := ss.writeSession(f, data)
+	if err != nil {
+		f.Close()
 		return fmt.Errorf("write session file: %w", err)
+	}
+	if n != len(data) {
+		f.Close()
+		return fmt.Errorf("short session write")
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("sync session file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close session file: %w", err)
+	}
+	if err := ss.replaceSession(f.Name(), path); err != nil {
+		return fmt.Errorf("replace session file: %w", err)
+	}
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(ss.sessionsDir)
+		if err != nil {
+			return fmt.Errorf("open session directory: %w", err)
+		}
+		err = d.Sync()
+		d.Close()
+		if err != nil {
+			return fmt.Errorf("sync session directory: %w", err)
+		}
 	}
 	return nil
 }
@@ -171,6 +234,9 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 // IndexMessage generates an embedding for a user message and adds it to the vector index.
 // Should be called after each user message is added to the session.
 func (ss *SessionStore) IndexMessage(ctx context.Context, s *Session, msgIndex int, msg Message) error {
+	if s.ChannelID == "console" {
+		return nil
+	}
 	if ss.infer == nil {
 		return nil
 	}
@@ -294,7 +360,12 @@ func (ss *SessionStore) loadEmbeddingCache() bool {
 	}
 
 	ss.mu.Lock()
-	ss.messages = cache.Messages
+	ss.messages = make([]sessionMessage, 0, len(cache.Messages))
+	for _, msg := range cache.Messages {
+		if !strings.HasPrefix(msg.SessionID, "console:") {
+			ss.messages = append(ss.messages, msg)
+		}
+	}
 	ss.mu.Unlock()
 	return true
 }
@@ -335,6 +406,9 @@ func (ss *SessionStore) buildEmbeddings(ctx context.Context) error {
 		}
 		var sf sessionFile
 		if json.Unmarshal(data, &sf) != nil {
+			continue
+		}
+		if sf.ChannelID == "console" || strings.HasPrefix(sf.ID, "console:") {
 			continue
 		}
 		for i, msg := range sf.Messages {

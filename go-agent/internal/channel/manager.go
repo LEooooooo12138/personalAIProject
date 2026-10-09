@@ -79,6 +79,10 @@ func (m *Manager) Run(ctx context.Context, handler func(msg Message)) {
 	merged := make(chan Message, 100)
 	var wg sync.WaitGroup
 	var handlers sync.WaitGroup
+	// Register predecessors in receive order, before goroutines can race to run.
+	type conversationKey struct{ channel, user string }
+	tails := make(map[conversationKey]chan struct{})
+	var queueMu sync.Mutex
 	defer func() {
 		wg.Wait()
 		handlers.Wait()
@@ -131,9 +135,33 @@ func (m *Manager) Run(ctx context.Context, handler func(msg Message)) {
 				zap.String("channel", msg.ChannelID),
 				zap.String("user", msg.UserID),
 			)
+			key := conversationKey{msg.ChannelID, msg.UserID}
+			completed := make(chan struct{})
+			queueMu.Lock()
+			previous := tails[key]
+			tails[key] = completed
+			queueMu.Unlock()
 			handlers.Add(1)
 			go func(msg Message) {
 				defer handlers.Done()
+				defer func() {
+					queueMu.Lock()
+					if tails[key] == completed {
+						delete(tails, key)
+					}
+					close(completed)
+					queueMu.Unlock()
+				}()
+				if previous != nil {
+					select {
+					case <-previous:
+					case <-ctx.Done():
+						return
+					}
+				}
+				if ctx.Err() != nil {
+					return
+				}
 				handler(msg)
 			}(msg)
 		}

@@ -110,8 +110,8 @@ func TestBuildSummariesCountsStateTransitions(t *testing.T) {
 		{State: "on", Timestamp: start}, {State: "on", Timestamp: start.Add(30 * time.Minute)},
 		{State: "off", Timestamp: start.Add(time.Hour)}, {State: "off", Timestamp: start.Add(2 * time.Hour)},
 	}}, 1, start, start.Add(24*time.Hour))
-	if len(got) != 1 || got[0].TotalOnTime != 1 || got[0].OnCount != 1 || got[0].OffCount != 1 {
-		t.Fatalf("summary = %#v; want one on/off transition and one hour", got)
+	if len(got) != 1 || got[0].TotalOnTime != 1 || got[0].OnCount != 0 || got[0].OffCount != 0 {
+		t.Fatalf("summary = %#v; want legacy duration without inferred operations", got)
 	}
 }
 
@@ -163,7 +163,9 @@ func TestSuggestionIDsSurvivePatternOrderChanges(t *testing.T) {
 
 func TestTriggerAnalysisPersistsReport(t *testing.T) {
 	dir := t.TempDir()
-	m, err := NewManager(HAConfig{BaseURL: "http://unused.invalid", AgentVaultPath: dir}, zap.NewNop())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"time_zone":"UTC"}`)) }))
+	defer server.Close()
+	m, err := NewManager(HAConfig{BaseURL: server.URL, AgentVaultPath: dir}, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}

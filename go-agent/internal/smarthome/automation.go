@@ -21,6 +21,16 @@ var (
 
 // BuildAutomation creates an AutomationConfig from a RuleSuggestion.
 func BuildAutomation(suggestion RuleSuggestion) (AutomationConfig, error) {
+	if suggestion.Intent != nil {
+		config, err := automationFromIntent(suggestion.Intent, suggestion.PresenceBinding)
+		if err != nil {
+			return AutomationConfig{}, err
+		}
+		config.ID = suggestion.ID
+		config.Alias = suggestion.Title
+		config.Description = suggestion.Description
+		return config, validateAutomation(config)
+	}
 	if suggestion.Automation == nil {
 		return AutomationConfig{}, fmt.Errorf("%w: explicit trigger, conditions and actions are required", ErrUnsupportedRule)
 	}
@@ -65,7 +75,16 @@ func validateAutomation(a AutomationConfig) error {
 		}
 	}
 	for _, condition := range a.Condition {
-		if condition.Condition != "state" || !entityIDPattern.MatchString(condition.EntityID) || condition.State == "" {
+		switch condition.Condition {
+		case "state":
+			if !entityIDPattern.MatchString(condition.EntityID) || condition.State == "" || condition.After != "" {
+				return invalid("invalid state condition")
+			}
+		case "sun":
+			if condition.After != "sunset" || condition.EntityID != "" || condition.State != "" {
+				return invalid("only sun after sunset is supported")
+			}
+		default:
 			return invalid("unsupported condition")
 		}
 	}
@@ -83,6 +102,14 @@ func validateAutomation(a AutomationConfig) error {
 
 // stableSuggestionID depends on rule semantics, not analysis order or observation date.
 func stableSuggestionID(s RuleSuggestion) string {
+	if s.Intent != nil {
+		data, _ := json.Marshal(struct {
+			Intent   *SuggestionIntent
+			Presence *PresenceBinding
+		}{s.Intent, s.PresenceBinding})
+		digest := sha256.Sum256(data)
+		return "rule-" + hex.EncodeToString(digest[:12])
+	}
 	semantic := struct {
 		Trigger, Condition, Action string
 		Automation                 *AutomationConfig
@@ -123,6 +150,7 @@ func RuleDocument(suggestion RuleSuggestion) string {
 title: %s
 created: %s
 source: agent-analysis
+tags: [internal]
 ha_automation_id: %s
 trigger: %s
 action: %s

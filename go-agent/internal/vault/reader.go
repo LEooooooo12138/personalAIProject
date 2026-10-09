@@ -3,9 +3,12 @@ package vault
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -85,11 +88,23 @@ type Status struct {
 type FileReader struct {
 	personalPath string
 	agentPath    string
+	policy       ContentPolicy
 }
 
 // NewFileReader creates a filesystem-backed vault reader.
 func NewFileReader(personalPath, agentPath string) *FileReader {
+	return NewFileReaderWithPolicy(personalPath, agentPath, ContentPolicy{})
+}
+
+func NewFileReaderWithPolicy(personalPath, agentPath string, policy ContentPolicy) *FileReader {
+	if root, ok := policy.roots["personal"]; ok {
+		personalPath = root
+	}
+	if root, ok := policy.roots["agent"]; ok {
+		agentPath = root
+	}
 	return &FileReader{
+		policy:       policy,
 		personalPath: personalPath,
 		agentPath:    agentPath,
 	}
@@ -124,11 +139,17 @@ func (r *FileReader) vaultPath(name string) (string, error) {
 
 // ReadIndex parses index.md lines into entries.
 func (r *FileReader) ReadIndex(ctx context.Context, vaultName string) ([]IndexEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	vp, err := r.vaultPath(vaultName)
 	if err != nil {
 		return nil, err
 	}
 
+	if !r.policy.Allows(vaultName, "index.md") {
+		return nil, fmt.Errorf("vault: index excluded by content policy")
+	}
 	data, err := readRootFile(vp, "index.md")
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -149,6 +170,9 @@ func (r *FileReader) ReadIndex(ctx context.Context, vaultName string) ([]IndexEn
 			title := line[1:idx]
 			rest := line[idx+2:]
 			if end := strings.Index(rest, ")"); end > 0 {
+				if !r.policy.Allows(vaultName, rest[:end]) {
+					continue
+				}
 				entries = append(entries, IndexEntry{
 					Title: title,
 					Path:  rest[:end],
@@ -161,21 +185,37 @@ func (r *FileReader) ReadIndex(ctx context.Context, vaultName string) ([]IndexEn
 
 // ReadPage reads a single wiki page with YAML frontmatter parsing.
 func (r *FileReader) ReadPage(ctx context.Context, vaultName string, relPath string) (*Page, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	vp, err := r.vaultPath(vaultName)
 	if err != nil {
 		return nil, err
 	}
 
+	if !r.policy.Allows(vaultName, relPath) || (r.policy.roots != nil && systemFiles[filepath.Base(relPath)]) {
+		return nil, fmt.Errorf("vault: page excluded by content policy")
+	}
 	data, err := readRootFile(vp, relPath)
 	if err != nil {
 		return nil, fmt.Errorf("vault: read page %s: %w", relPath, err)
 	}
 
-	return ParsePage(data)
+	page, err := ParsePage(data)
+	if err != nil {
+		return nil, fmt.Errorf("vault: parse page %s: %w", relPath, err)
+	}
+	if page.Title == "" {
+		page.Title = strings.TrimSuffix(filepath.Base(relPath), ".md")
+	}
+	return page, nil
 }
 
 // Search performs a case-insensitive keyword search across vault markdown files.
 func (r *FileReader) Search(ctx context.Context, vaultName string, keyword string) ([]SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	vp, err := r.vaultPath(vaultName)
 	if err != nil {
 		return nil, err
@@ -187,15 +227,31 @@ func (r *FileReader) Search(ctx context.Context, vaultName string, keyword strin
 	}
 
 	// BM25-ranked search over vault markdown files.
-	bm25Results, err := bm25Search(vp, tokens, systemFiles)
+	bm25Results, err := bm25SearchWithPolicy(vp, vaultName, tokens, systemFiles, r.policy)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []SearchResult
 	for _, br := range bm25Results {
+		if !r.policy.Allows(vaultName, br.Path) {
+			continue
+		}
 		data, err := readRootFile(vp, br.Path)
 		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		page, err := ParsePage(data)
+		if errors.Is(err, ErrInvalidFrontmatter) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if IsInternalPage(page) {
 			continue
 		}
 
@@ -204,7 +260,7 @@ func (r *FileReader) Search(ctx context.Context, vaultName string, keyword strin
 		snippet := extractSnippet(string(data), content, tokens)
 
 		title := strings.TrimSuffix(filepath.Base(br.Path), ".md")
-		if page, err := ParsePage(data); err == nil && page.Title != "" {
+		if page.Title != "" {
 			title = page.Title
 		}
 		results = append(results, SearchResult{
@@ -251,53 +307,96 @@ func (r *FileReader) Status(ctx context.Context) (*Status, error) {
 	s.Personal.Path = r.personalPath
 	s.Agent.Path = r.agentPath
 
-	if err := statVault(r.personalPath, &s.Personal.PageCount, &s.Personal.TotalBytes); err != nil {
+	if err := statVaultWithPolicy(r.personalPath, "personal", r.policy, &s.Personal.PageCount, &s.Personal.TotalBytes); err != nil {
 		return nil, fmt.Errorf("vault: personal status: %w", err)
 	}
-	if err := statVault(r.agentPath, &s.Agent.PageCount, &s.Agent.TotalBytes); err != nil {
+	if err := statVaultWithPolicy(r.agentPath, "agent", r.policy, &s.Agent.PageCount, &s.Agent.TotalBytes); err != nil {
 		return nil, fmt.Errorf("vault: agent status: %w", err)
 	}
 	return &s, nil
 }
 
-// ParsePage extracts YAML frontmatter and body from raw markdown.
+// ErrInvalidFrontmatter identifies a page whose declared metadata cannot be trusted.
+var ErrInvalidFrontmatter = errors.New("vault: invalid frontmatter")
+
+// ParsePage rejects malformed or ill-typed metadata without exposing partial pages.
+// Missing metadata is ordinary Markdown; a caller with a path supplies its title.
 func ParsePage(data []byte) (*Page, error) {
-	// Strip UTF-8 BOM if present (Windows PowerShell/Out-File adds it).
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
-	content := string(data)
-	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	page := &Page{RawContent: data}
-
-	if strings.HasPrefix(content, "---\n") {
-		end := strings.Index(content[4:], "\n---\n")
-		if end > 0 {
-			fm := content[4 : 4+end]
-			var frontmatter struct {
-				Title    string   `yaml:"title"`
-				Tags     []string `yaml:"tags"`
-				Category string   `yaml:"category"`
-				Created  string   `yaml:"created"`
-				Updated  string   `yaml:"updated"`
-			}
-			if err := yaml.Unmarshal([]byte(fm), &frontmatter); err == nil {
-				page.Title = frontmatter.Title
-				page.Tags = frontmatter.Tags
-				page.Category = frontmatter.Category
-				page.Created = frontmatter.Created
-				page.Updated = frontmatter.Updated
-			}
-			page.Body = strings.TrimSpace(content[4+end+5:])
-		} else {
-			page.Body = strings.TrimSpace(content)
-		}
-	} else {
+	lines := strings.Split(content, "\n")
+	if lines[0] != "---" {
 		page.Body = strings.TrimSpace(content)
+		return page, nil
 	}
-
-	if page.Title == "" {
-		// Fallback: use filename without extension as title.
-		page.Title = "untitled"
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == "---" {
+			end = i
+			break
+		}
 	}
+	if end < 0 {
+		return nil, fmt.Errorf("%w: missing closing delimiter", ErrInvalidFrontmatter)
+	}
+	fm := strings.Join(lines[1:end], "\n")
+	var document yaml.Node
+	decoder := yaml.NewDecoder(strings.NewReader(fm))
+	if err := decoder.Decode(&document); err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidFrontmatter, err)
+	}
+	// A frontmatter block is exactly one YAML document. Unmarshal otherwise
+	// silently ignores content after an explicit YAML document terminator.
+	var trailing yaml.Node
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: trailing YAML content", ErrInvalidFrontmatter)
+	}
+	if len(document.Content) > 0 {
+		node := document.Content[0]
+		if node.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%w: expected mapping", ErrInvalidFrontmatter)
+		}
+		// Decoding a map rejects duplicate keys, including nested extension metadata.
+		var checked map[string]interface{}
+		if err := node.Decode(&checked); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidFrontmatter, err)
+		}
+		for i := 0; i < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if node.Content[i].Tag != "!!str" {
+				return nil, fmt.Errorf("%w: invalid metadata key", ErrInvalidFrontmatter)
+			}
+			switch key {
+			case "title", "category", "created", "updated":
+				isDate := (key == "created" || key == "updated") && value.Tag == "!!timestamp"
+				if value.Kind != yaml.ScalarNode || (value.Tag != "!!str" && !isDate) {
+					return nil, fmt.Errorf("%w: %s must be a string", ErrInvalidFrontmatter, key)
+				}
+				switch key {
+				case "title":
+					page.Title = value.Value
+				case "category":
+					page.Category = value.Value
+				case "created":
+					page.Created = value.Value
+				case "updated":
+					page.Updated = value.Value
+				}
+			case "tags":
+				if value.Kind != yaml.SequenceNode {
+					return nil, fmt.Errorf("%w: tags must be a string list", ErrInvalidFrontmatter)
+				}
+				for _, tag := range value.Content {
+					if tag.Kind != yaml.ScalarNode || tag.Tag != "!!str" {
+						return nil, fmt.Errorf("%w: tags must contain strings", ErrInvalidFrontmatter)
+					}
+					page.Tags = append(page.Tags, tag.Value)
+				}
+			}
+		}
+	}
+	page.Body = strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
 	return page, nil
 }
 
@@ -383,9 +482,22 @@ func (w *FileWriter) UpdateIndex(ctx context.Context, vaultName string, entry In
 // --  helpers --
 
 func statVault(root string, count *int, totalBytes *int64) error {
+	return statVaultWithPolicy(root, "", ContentPolicy{}, count, totalBytes)
+}
+
+func statVaultWithPolicy(root, vaultName string, policy ContentPolicy, count *int, totalBytes *int64) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+		if path != root {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil || !policy.Allows(vaultName, rel) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
@@ -447,6 +559,27 @@ var entityTriggerTags = map[string]bool{
 // extraEntities provides a manual override list merged into the result.
 // Duplicates are removed.
 func ExtractTriggerEntities(personalPath string, extraEntities []string) ([]string, error) {
+	return extractTriggerEntities(context.Background(), personalPath, extraEntities)
+}
+
+// TriggerEntities scans only the selected vault on every request. No startup
+// snapshot or metadata-only cache can retain a removed or newly private entity.
+func (r *FileReader) TriggerEntities(ctx context.Context, vaultName string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	root, err := r.vaultPath(vaultName)
+	if err != nil {
+		return nil, err
+	}
+	return extractTriggerEntitiesWithPolicy(ctx, root, vaultName, r.policy, nil)
+}
+
+func extractTriggerEntities(ctx context.Context, personalPath string, extraEntities []string) ([]string, error) {
+	return extractTriggerEntitiesWithPolicy(ctx, personalPath, "", ContentPolicy{}, extraEntities)
+}
+
+func extractTriggerEntitiesWithPolicy(ctx context.Context, personalPath, vaultName string, policy ContentPolicy, extraEntities []string) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, e := range extraEntities {
 		e = strings.TrimSpace(e)
@@ -456,12 +589,27 @@ func ExtractTriggerEntities(personalPath string, extraEntities []string) ([]stri
 	}
 
 	err := filepath.WalkDir(personalPath, func(path string, d os.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
-			return nil // skip unreadable files
+			return err
+		}
+		if path != personalPath {
+			rel, relErr := filepath.Rel(personalPath, path)
+			if relErr != nil {
+				return relErr
+			}
+			if !policy.Allows(vaultName, rel) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_") {
+			if path != personalPath && (strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_")) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -476,18 +624,23 @@ func ExtractTriggerEntities(personalPath string, extraEntities []string) ([]stri
 
 		relPath, relErr := filepath.Rel(personalPath, path)
 		if relErr != nil {
-			return nil
+			return relErr
 		}
 		data, readErr := readRootFile(personalPath, relPath)
 		if readErr != nil {
-			return nil
+			return readErr
 		}
 
 		page, parseErr := ParsePage(data)
-		if parseErr != nil || page == nil {
+		if errors.Is(parseErr, ErrInvalidFrontmatter) {
 			return nil
 		}
-
+		if parseErr != nil {
+			return parseErr
+		}
+		if IsInternalPage(page) {
+			return nil
+		}
 		title := strings.TrimSpace(page.Title)
 		if title == "" || title == "untitled" {
 			return nil
@@ -531,6 +684,10 @@ func ExtractTriggerEntities(personalPath string, extraEntities []string) ([]stri
 	entities := make([]string, 0, len(seen))
 	for e := range seen {
 		entities = append(entities, e)
+	}
+	sort.Strings(entities)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return entities, nil
 }

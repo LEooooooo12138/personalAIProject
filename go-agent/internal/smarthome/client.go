@@ -7,15 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
 
 // HomeAssistantClient communicates with Home Assistant via its REST API.
 type HomeAssistantClient struct {
-	BaseURL    string
-	Token      string
-	httpClient *http.Client
+	BaseURL       string
+	Token         string
+	httpClient    *http.Client
+	tokenProvider TokenProvider
 }
 
 // NewHomeAssistantClient creates a new HA REST client.
@@ -24,45 +27,66 @@ func NewHomeAssistantClient(baseURL, token string, timeout time.Duration) *HomeA
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		httpClient: &http.Client{
-			Timeout: timeout,
+			Timeout:       timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
 
+func (c *HomeAssistantClient) accessToken(ctx context.Context) (string, error) {
+	if c.tokenProvider != nil {
+		return c.tokenProvider.Token(ctx)
+	}
+	return c.Token, nil
+}
+func (c *HomeAssistantClient) Close() {
+	if c.tokenProvider != nil {
+		c.tokenProvider.Close()
+	}
+}
 func (c *HomeAssistantClient) do(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
-	url := c.BaseURL + path
-	var reqBody io.Reader
+	var payload []byte
+	var err error
 	if body != nil {
-		b, err := json.Marshal(body)
+		payload, err = json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("smarthome: marshal request: %w", err)
+			return nil, newHAError("ha_invalid_response")
 		}
-		reqBody = bytes.NewReader(b)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("smarthome: create request: %w", err)
+	for attempt := 0; attempt < 2; attempt++ {
+		token, e := c.accessToken(ctx)
+		if e != nil {
+			return nil, e
+		}
+		req, e := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(payload))
+		if e != nil {
+			return nil, newHAError("ha_invalid_response")
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := c.httpClient.Do(req)
+		if e != nil {
+			return nil, safeHAError(e)
+		}
+		if resp.StatusCode == 401 && c.tokenProvider != nil {
+			c.tokenProvider.Invalidate(token)
+		}
+		if resp.StatusCode == 401 && c.tokenProvider != nil && method == http.MethodGet && attempt == 0 {
+			resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			resp.Body.Close()
+			return nil, haStatusError(resp.StatusCode)
+		}
+		raw, e := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		resp.Body.Close()
+		if e != nil {
+			return nil, safeHAError(e)
+		}
+		return raw, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("smarthome: request %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("smarthome: read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("smarthome: %s %s returned %d: %s", method, path, resp.StatusCode, string(respBody))
-	}
-
-	return respBody, nil
+	return nil, newHAError("ha_auth_required")
 }
 
 // GetStates queries all entity states from Home Assistant.
@@ -72,8 +96,13 @@ func (c *HomeAssistantClient) GetStates(ctx context.Context) ([]EntityState, err
 		return nil, err
 	}
 	var states []EntityState
-	if err := json.Unmarshal(body, &states); err != nil {
-		return nil, fmt.Errorf("smarthome: unmarshal states: %w", err)
+	if err := json.Unmarshal(body, &states); err != nil || states == nil {
+		return nil, newHAError("ha_invalid_response")
+	}
+	for _, state := range states {
+		if state.EntityID == "" {
+			return nil, newHAError("ha_invalid_response")
+		}
 	}
 	return states, nil
 }
@@ -85,47 +114,76 @@ func (c *HomeAssistantClient) GetState(ctx context.Context, entityID string) (*E
 		return nil, err
 	}
 	var state EntityState
-	if err := json.Unmarshal(body, &state); err != nil {
-		return nil, fmt.Errorf("smarthome: unmarshal state: %w", err)
+	if err := json.Unmarshal(body, &state); err != nil || state.EntityID != entityID {
+		return nil, newHAError("ha_invalid_response")
 	}
 	return &state, nil
 }
 
-// GetHistory queries historical state changes.
-// entityID can be "" to get all entities.
-// start and end define the time range; pass zero values for "now".
+// GetHistory retains the single-entity API; unfiltered requests are forbidden.
 func (c *HomeAssistantClient) GetHistory(ctx context.Context, entityID string, start, end time.Time) ([]HistoryEntry, error) {
-	path := "/api/history/period"
-	if !start.IsZero() {
-		path += "/" + start.UTC().Format(time.RFC3339)
-	}
-	if entityID != "" {
-		path += "?filter_entity_id=" + entityID
-	}
-	if !end.IsZero() {
-		sep := "&"
-		if !strings.Contains(path, "?") {
-			sep = "?"
+	return c.GetHistoryForEntities(ctx, []string{entityID}, start, end)
+}
+func historyPath(ids []string, start, end time.Time) string {
+	q := url.Values{}
+	q.Set("filter_entity_id", strings.Join(ids, ","))
+	q.Set("end_time", end.UTC().Format(time.RFC3339Nano))
+	return "/api/history/period/" + url.PathEscape(start.UTC().Format(time.RFC3339Nano)) + "?" + q.Encode()
+}
+func uniqueEntityIDs(ids []string) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, id := range ids {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			result = append(result, id)
 		}
-		path += sep + "end_time=" + end.UTC().Format(time.RFC3339)
 	}
-
-	body, err := c.do(ctx, http.MethodGet, path, nil)
+	sort.Strings(result)
+	return result
+}
+func (c *HomeAssistantClient) GetHistoryForEntities(ctx context.Context, entityIDs []string, start, end time.Time) ([]HistoryEntry, error) {
+	ids := uniqueEntityIDs(entityIDs)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("history requires explicit entity IDs")
+	}
+	if start.IsZero() || !end.After(start) {
+		return nil, fmt.Errorf("history requires ordered start and end")
+	}
+	body, err := c.do(ctx, http.MethodGet, historyPath(ids, start, end), nil)
 	if err != nil {
 		return nil, err
 	}
-
-	// HA returns a slice of slices: [][]HistoryEntry
 	var chunks [][]HistoryEntry
-	if err := json.Unmarshal(body, &chunks); err != nil {
-		return nil, fmt.Errorf("smarthome: unmarshal history: %w", err)
+	if err = json.Unmarshal(body, &chunks); err != nil || chunks == nil {
+		return nil, newHAError("ha_invalid_response")
 	}
-
-	var entries []HistoryEntry
+	allowed := map[string]bool{}
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	seen := map[string]bool{}
+	var result []HistoryEntry
 	for _, chunk := range chunks {
-		entries = append(entries, chunk...)
+		if chunk == nil {
+			return nil, newHAError("ha_invalid_response")
+		}
+		for _, entry := range chunk {
+			if !allowed[entry.EntityID] {
+				return nil, newHAError("ha_invalid_response")
+			}
+			first := !seen[entry.EntityID]
+			seen[entry.EntityID] = true
+			entry.ObservationKind = "change"
+			if first && entry.Timestamp.Equal(start) {
+				entry.ObservationKind = "initial"
+			}
+			if !entry.Timestamp.Before(start) && entry.Timestamp.Before(end) {
+				result = append(result, entry)
+			}
+		}
 	}
-	return entries, nil
+	return deduplicateHistory(result), nil
 }
 
 // CallService calls a Home Assistant service (domain.service).
@@ -157,8 +215,8 @@ func (c *HomeAssistantClient) GetConfig(ctx context.Context) (map[string]interfa
 		return nil, err
 	}
 	var config map[string]interface{}
-	if err := json.Unmarshal(body, &config); err != nil {
-		return nil, fmt.Errorf("smarthome: unmarshal config: %w", err)
+	if err := json.Unmarshal(body, &config); err != nil || config == nil {
+		return nil, newHAError("ha_invalid_response")
 	}
 	return config, nil
 }

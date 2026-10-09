@@ -173,9 +173,7 @@ func buildChatRequest(state *ChainState, model string, temperature float64, maxT
 	if _, ok := req["max_tokens"]; !ok {
 		req["max_tokens"] = maxTokens
 	}
-	if _, ok := req["thinking"]; !ok {
-		req["thinking"] = map[string]string{"type": "disabled"}
-	}
+	withCallerReasoning(state, req)
 	if _, ok := req["messages"]; !ok {
 		req["messages"] = buildChatMessagesWithoutSystemPrompt(state)
 	}
@@ -231,11 +229,10 @@ func (s *LLMSummarizeStep) Run(ctx context.Context, state *ChainState) error {
 		c = v
 	}
 	prompt := fmt.Sprintf("Please summarize the following content as structured JSON in Chinese:\n\n{\n  \"title\": \"one-sentence summary\",\n  \"decisions\": \"key conclusions (or 'none')\",\n  \"follow_ups\": \"follow-up items (or 'none')\",\n  \"confidence\": 0.0-1.0\n}\n\nContent:\n%s", c)
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(withCallerReasoning(state, map[string]interface{}{
 		"model": s.model, "messages": []map[string]string{{"role": "user", "content": prompt}},
 		"temperature": 0.3, "max_tokens": 1024,
-		"thinking": map[string]string{"type": "disabled"},
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
@@ -300,11 +297,10 @@ func (s *LLMIngestStep) Run(ctx context.Context, state *ChainState) error {
 		rc = state.Query
 	}
 	prompt := fmt.Sprintf("You are a knowledge management expert. Analyze the following content and extract key concepts, entities, and relationships. Output in Markdown format.\n\nRequirements:\n- Start with YAML frontmatter (title, tags, category, created)\n- Use ## headings\n- Bold key concepts\n- Define terms on first use\n- Preserve important code examples and configs\n\nContent:\n%s", rc)
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(withCallerReasoning(state, map[string]interface{}{
 		"model": s.model, "messages": []map[string]string{{"role": "user", "content": prompt}},
 		"temperature": 0.4, "max_tokens": 4096,
-		"thinking": map[string]string{"type": "disabled"},
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
@@ -354,11 +350,10 @@ func (s *LLMSynthesizeStep) Run(ctx context.Context, state *ChainState) error {
 		st.WriteString(fmt.Sprintf("### %s\n%s\n\n", src.Title, src.Body))
 	}
 	prompt := fmt.Sprintf("You are a knowledge analyst. Below are related but distinct knowledge points. Synthesize them:\n\n1. **Common theme**: what core concept do they share?\n2. **Differences**: what important distinctions or perspectives?\n3. **Cross-insight**: what can only be discovered by reading all together?\n4. **To explore**: what directions deserve deeper investigation?\n\nContent:\n%s", st.String())
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(withCallerReasoning(state, map[string]interface{}{
 		"model": s.model, "messages": []map[string]string{{"role": "user", "content": prompt}},
 		"temperature": 0.6, "max_tokens": 4096,
-		"thinking": map[string]string{"type": "disabled"},
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
@@ -435,11 +430,10 @@ func (s *LLMCrossLinkStep) Run(ctx context.Context, state *ChainState) error {
 		pt.WriteString(fmt.Sprintf("Page %d: %s\n%s\n\n", i+1, src.Title, vault.Truncate(src.Body, 500)))
 	}
 	prompt := fmt.Sprintf("Analyze the following wiki pages and find cross-reference relationships that should but don't yet exist.\n\nFor each pair, explain:\n1. What is the relationship? (conceptual dependency, complement, contrast, practice/theory)\n2. Which section should add a [[link]]?\n3. Connection strength (1-5)\n\nPages:\n%s", pt.String())
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(withCallerReasoning(state, map[string]interface{}{
 		"model": s.model, "messages": []map[string]string{{"role": "user", "content": prompt}},
 		"temperature": 0.3, "max_tokens": 4096,
-		"thinking": map[string]string{"type": "disabled"},
-	})
+	}))
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
@@ -473,4 +467,24 @@ func buildChatMessagesWithoutSystemPrompt(state *ChainState) []map[string]string
 	}
 	msgs = append(msgs, map[string]string{"role": "user", "content": state.Query})
 	return msgs
+}
+
+// Ollama's OpenAI compatibility layer accepts reasoning_effort/reasoning.effort.
+// Preserve explicit caller controls for every LLM step; default internal and
+// ordinary requests to no thinking without changing other caller parameters.
+func withCallerReasoning(state *ChainState, req map[string]interface{}) map[string]interface{} {
+	if caller, ok := state.Data["chat_request"].(map[string]interface{}); ok {
+		if effort, ok := caller["reasoning_effort"]; ok {
+			req["reasoning_effort"] = effort
+		}
+		if reasoning, ok := caller["reasoning"]; ok {
+			req["reasoning"] = reasoning
+		}
+	}
+	if _, hasEffort := req["reasoning_effort"]; !hasEffort {
+		if _, hasReasoning := req["reasoning"]; !hasReasoning {
+			req["reasoning_effort"] = "none"
+		}
+	}
+	return req
 }

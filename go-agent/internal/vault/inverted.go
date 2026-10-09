@@ -2,6 +2,7 @@ package vault
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -20,7 +21,7 @@ import (
 //   If mtime matches → use cached tf data.
 //   If mtime differs → rebuild that document (and save on next cache write).
 
-const invertedCacheVersion = 2
+const invertedCacheVersion = 3
 
 // ── In-memory types ──
 
@@ -73,7 +74,12 @@ type invertedIndexCache struct {
 // BuildIndex walks the vault directory and constructs the inverted index.
 // systemFiles are skipped (index.md, log.md, etc.).
 func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) error {
+	return idx.buildIndexWithPolicy(root, "", systemFiles, ContentPolicy{})
+}
+
+func (idx *InvertedIndex) buildIndexWithPolicy(root, vaultName string, systemFiles map[string]bool, policy ContentPolicy) error {
 	idx.docs = nil
+	idx.avgdl = 0
 	idx.postings = make(map[string][]postingEntry)
 	var totalLen int
 
@@ -81,9 +87,21 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 		if err != nil {
 			return err
 		}
+		if path != root {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			if !policy.Allows(vaultName, rel) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_") {
+			if path != root && (strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_")) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -97,7 +115,7 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			return err
 		}
 
 		relPath, _ := filepath.Rel(root, path)
@@ -108,12 +126,19 @@ func (idx *InvertedIndex) BuildIndex(root string, systemFiles map[string]bool) e
 
 		// Resolve frontmatter title.
 		title := strings.TrimSuffix(filepath.Base(path), ".md")
-		if page, err := ParsePage(data); err == nil && page.Title != "" {
-			title = page.Title
+		page, parseErr := ParsePage(data)
+		if parseErr != nil && !errors.Is(parseErr, ErrInvalidFrontmatter) {
+			return parseErr
 		}
-
-		content := strings.ToLower(string(data))
-		docTok := tokenize(content)
+		var docTok []string
+		// Keep every path/hash in the manifest, but never index private or
+		// untrusted content. This also avoids rebuilding unchanged bad pages.
+		if parseErr == nil && !IsInternalPage(page) {
+			if page.Title != "" {
+				title = page.Title
+			}
+			docTok = tokenize(strings.ToLower(string(data)))
+		}
 		tf := make(map[string]int)
 		for _, t := range docTok {
 			tf[t]++
@@ -242,7 +267,11 @@ func (idx *InvertedIndex) loadCache(data []byte) error {
 
 // Validate compares the complete file set and content hashes.
 func (idx *InvertedIndex) Validate(root string) bool {
-	manifest, err := markdownFiles(root, systemFiles)
+	return idx.validateWithPolicy(root, "", ContentPolicy{})
+}
+
+func (idx *InvertedIndex) validateWithPolicy(root, vaultName string, policy ContentPolicy) bool {
+	manifest, err := policy.markdownFiles(root, vaultName)
 	if err != nil || len(manifest) != len(idx.docs) {
 		return false
 	}
@@ -316,4 +345,32 @@ func (idx *InvertedIndex) SearchWithBM25(tokens []string, k1, b float64) []bm25R
 		}
 	}
 	return results
+}
+
+// Legacy caches are reusable only when their complete manifest matches the
+// allowed manifest. Operational documents invalidate and replace the cache.
+func bm25SearchWithPolicy(root, vaultName string, tokens []string, excluded map[string]bool, policy ContentPolicy) ([]bm25Result, error) {
+	if policy.roots == nil {
+		return bm25Search(root, tokens, excluded)
+	}
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	idx := &InvertedIndex{}
+	cachePath := filepath.Join(bm25CacheDir, bm25CacheFile)
+	if data, err := readRootFile(root, cachePath); err != nil || idx.loadCache(data) != nil || !idx.validateWithPolicy(root, vaultName, policy) {
+		if err := idx.buildIndexWithPolicy(root, vaultName, excluded, policy); err != nil {
+			return nil, err
+		}
+		if data, err := idx.marshalCache(); err == nil {
+			_ = writeRootFile(root, cachePath, data, 0600)
+		}
+	}
+	var allowed []bm25Result
+	for _, result := range idx.SearchWithBM25(tokens, bm25k1, bm25b) {
+		if policy.Allows(vaultName, result.Path) {
+			allowed = append(allowed, result)
+		}
+	}
+	return allowed, nil
 }

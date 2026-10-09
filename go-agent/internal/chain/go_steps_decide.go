@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"go.uber.org/zap"
@@ -9,8 +10,8 @@ import (
 
 // EntityTriggerDecideStep is a deterministic, rule-based routing step.
 // It does NOT call the LLM. Instead, it checks whether the user's query
-// contains any entity name from a pre-built trigger list extracted from
-// the vault (person names, project names, etc.).
+// contains any entity name from the selected vault, scanned for each request,
+// including person names and project names.
 //
 // Decision behaviour:
 //   "search" -> continue chain to VaultSearchStep -> LLMAnswerStep (RAG path)
@@ -21,16 +22,20 @@ import (
 //   "Who are you", "Hello", "What is X" -> all go to direct path.
 //   "Yaoyuanle XXXX" -> triggers RAG because "Yaoyuanle" is a known entity.
 
+type TriggerEntityProvider interface {
+	TriggerEntities(context.Context, string) ([]string, error)
+}
+
 type EntityTriggerDecideStep struct {
-	entities []string // pre-built trigger entity list
+	provider TriggerEntityProvider
 	logger   *zap.Logger
 }
 
 // NewEntityTriggerDecideStep creates a rule-based routing step.
-// entities is the pre-extracted list from vault frontmatter + manual config.
-func NewEntityTriggerDecideStep(entities []string, logger *zap.Logger) *EntityTriggerDecideStep {
+// provider supplies current entities for the target vault.
+func NewEntityTriggerDecideStep(provider TriggerEntityProvider, logger *zap.Logger) *EntityTriggerDecideStep {
 	return &EntityTriggerDecideStep{
-		entities: entities,
+		provider: provider,
 		logger:   logger,
 	}
 }
@@ -40,6 +45,16 @@ func (s *EntityTriggerDecideStep) Name() string { return "entity-trigger-decide"
 // Run checks whether any trigger entity appears in the query.
 // Sets llm_decision = "search" or "direct" and optionally sets search_query.
 func (s *EntityTriggerDecideStep) Run(ctx context.Context, state *ChainState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.provider == nil {
+		return fmt.Errorf("entity trigger provider is required")
+	}
+	entities, err := s.provider.TriggerEntities(ctx, state.Vault)
+	if err != nil {
+		return fmt.Errorf("load trigger entities: %w", err)
+	}
 	query := strings.TrimSpace(state.Query)
 
 	// Extremely short queries -> direct.
@@ -50,7 +65,7 @@ func (s *EntityTriggerDecideStep) Run(ctx context.Context, state *ChainState) er
 	}
 
 	// Check each entity against the query.
-	for _, entity := range s.entities {
+	for _, entity := range entities {
 		if entity == "" {
 			continue
 		}

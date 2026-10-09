@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
+	"github.com/yuanleyao/ai-agent/internal/console"
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
@@ -34,6 +37,7 @@ type App struct {
 
 	SessionMgr   *SessionManager
 	SessionStore *SessionStore
+	ConsoleStore *console.Store
 
 	ChainExecutor *chain.ChainExecutor
 	ChainRouter   *chain.ChainRouter
@@ -63,17 +67,43 @@ func Bootstrap(configPath string) (*App, error) {
 
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
-		logger.Fatal("failed to load config", zap.Error(err))
+		return nil, err
+	}
+	// Normalize existing relative configuration before validating relationships.
+	personalRoot, err := filepath.Abs(cfg.Vaults.Personal)
+	if err != nil {
+		return nil, fmt.Errorf("vault policy: personal root: %w", err)
+	}
+	agentRoot, err := filepath.Abs(cfg.Vaults.Agent)
+	if err != nil {
+		return nil, fmt.Errorf("vault policy: agent root: %w", err)
+	}
+	archiveRoot, err := filepath.Abs(cfg.SmartHome.AgentVaultPath)
+	if err != nil {
+		return nil, fmt.Errorf("vault policy: HA archive: %w", err)
+	}
+	policy, err := vault.NewContentPolicy(map[string]string{"personal": personalRoot, "agent": agentRoot}, []string{archiveRoot})
+	if err != nil {
+		return nil, err
+	}
+	var consoleStore *console.Store
+	if cfg.Console.Enabled {
+		consoleStore, err = console.OpenStore(cfg.Console.DataDir, time.Now)
+		if err != nil {
+			return nil, fmt.Errorf("console store: %w", err)
+		}
 	}
 
 	backend := inference.NewOllamaClient(cfg.Inference.Endpoint, cfg.Inference.Timeout)
+	vaultReader := vault.NewFileReaderWithPolicy(cfg.Vaults.Personal, cfg.Vaults.Agent, policy)
 
 	app := &App{
-		Config: cfg,
-		Logger: logger,
-		Infer:  backend,
-		VaultR: vault.NewFileReader(cfg.Vaults.Personal, cfg.Vaults.Agent),
-		VaultW: vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
+		Config:       cfg,
+		Logger:       logger,
+		Infer:        backend,
+		VaultR:       vaultReader,
+		VaultW:       vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
+		ConsoleStore: consoleStore,
 	}
 
 	// Channels
@@ -109,24 +139,26 @@ func Bootstrap(configPath string) (*App, error) {
 	embedAdapter := &ollamaEmbedder{client: backend, model: cfg.Inference.Models.Embedding}
 	app.SessionStore = NewSessionStore(app.SessionMgr, cfg.Vaults.Agent+"/_sessions", embedAdapter, logger)
 	if err := app.SessionStore.Initialize(context.Background()); err != nil {
-		logger.Warn("session store init failed (non-fatal)", zap.Error(err))
+		return nil, fmt.Errorf("session store: %w", err)
 	}
 
 	// Memory sedimentation
 	app.Sedimenter = memory.NewSedimenter(cfg.Vaults.Personal, memory.NewSummarizer(app.Infer, logger), logger)
 
 	// Embedding store
-	app.EmbedStore = vault.NewScopedEmbeddingStore(app.Infer, app.VaultR, cfg.Vaults.Personal, "personal", cfg.Inference.Models.Embedding, logger)
-	app.AgentEmbedStore = vault.NewScopedEmbeddingStore(app.Infer, app.VaultR, cfg.Vaults.Agent, "agent", cfg.Inference.Models.Embedding, logger)
+	app.EmbedStore = vault.NewScopedEmbeddingStoreWithPolicy(app.Infer, app.VaultR, cfg.Vaults.Personal, "personal", cfg.Inference.Models.Embedding, logger, policy)
+	app.AgentEmbedStore = vault.NewScopedEmbeddingStoreWithPolicy(app.Infer, app.VaultR, cfg.Vaults.Agent, "agent", cfg.Inference.Models.Embedding, logger, policy)
 
 	// Smart home subsystem (Phase 4).
 	if cfg.SmartHome.Enabled && cfg.SmartHome.BaseURL != "" {
 		shCfg := smarthome.HAConfig{
-			BaseURL:         cfg.SmartHome.BaseURL,
-			Token:           cfg.SmartHome.Token,
-			PollIntervalSec: cfg.SmartHome.PollIntervalSec,
-			AnalysisHour:    cfg.SmartHome.AnalysisHour,
-			AgentVaultPath:  cfg.SmartHome.AgentVaultPath,
+			BaseURL:              cfg.SmartHome.BaseURL,
+			Token:                cfg.SmartHome.Token,
+			OAuthCredentialsFile: cfg.SmartHome.OAuthCredentialsFile,
+			PollIntervalSec:      cfg.SmartHome.PollIntervalSec,
+			AnalysisHour:         cfg.SmartHome.AnalysisHour,
+			TimeZone:             cfg.SmartHome.TimeZone,
+			AgentVaultPath:       cfg.SmartHome.AgentVaultPath,
 		}
 		shMgr, err := smarthome.NewManager(shCfg, logger)
 		if err != nil {
@@ -135,13 +167,6 @@ func Bootstrap(configPath string) (*App, error) {
 			app.SmartHome = shMgr
 		}
 	}
-
-	// Trigger entities for RAG routing
-	triggerEntities, err := vault.ExtractTriggerEntities(cfg.Vaults.Personal, nil)
-	if err != nil {
-		logger.Warn("entity extraction failed, using empty list", zap.Error(err))
-	}
-	logger.Info("trigger entities extracted", zap.Int("count", len(triggerEntities)))
 
 	// Chain system
 	embedSearchAdapter := chain.NewVaultEmbeddingStoreAdapter(
@@ -157,18 +182,18 @@ func Bootstrap(configPath string) (*App, error) {
 	)
 
 	chainDeps := chain.ChainDeps{
-		VaultReader:     app.VaultR,
-		VaultWriter:     app.VaultW,
-		Infer:           app.Infer,
-		Model:           cfg.Inference.Models.Local,
-		EmbedStore:      embedSearchAdapter,
-		PersonalPath:    cfg.Vaults.Personal,
-		AgentPath:       cfg.Vaults.Agent,
-		Logger:          logger,
-		TriggerEntities: triggerEntities,
-		RRFK:            cfg.Retrieval.RRFK,
-		TopK:            cfg.Retrieval.TopK,
-		MaxChunkChars:   cfg.Retrieval.MaxChunkChars,
+		VaultReader:           app.VaultR,
+		VaultWriter:           app.VaultW,
+		Infer:                 app.Infer,
+		Model:                 cfg.Inference.Models.Local,
+		EmbedStore:            embedSearchAdapter,
+		PersonalPath:          cfg.Vaults.Personal,
+		AgentPath:             cfg.Vaults.Agent,
+		Logger:                logger,
+		TriggerEntityProvider: vaultReader,
+		RRFK:                  cfg.Retrieval.RRFK,
+		TopK:                  cfg.Retrieval.TopK,
+		MaxChunkChars:         cfg.Retrieval.MaxChunkChars,
 	}
 
 	app.ChainRouter, err = chain.BuildAllChains(chainDeps)

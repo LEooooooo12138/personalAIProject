@@ -141,6 +141,31 @@ func (s *Store) Resolve(token string) (Principal, error) {
 	return p, err
 }
 
+// WithSession serializes a short final commit/publication with session revocation.
+// fn must not call Store methods or perform inference. Its I/O must honor the
+// supplied cancellation/expiry deadline. A publication already in progress
+// precedes revocation; this cannot retract bytes already handed to the network.
+func (s *Store) WithSession(ctx context.Context, token string, fn func(context.Context) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p, sess, err := s.resolveLocked(token)
+	if err != nil {
+		return err
+	}
+	if p.MustChangePassword {
+		return ErrForbidden
+	}
+	bounded, cancel := context.WithTimeout(ctx, sess.ExpiresAt.Sub(s.now()))
+	defer cancel()
+	if err := bounded.Err(); err != nil {
+		return err
+	}
+	return fn(bounded)
+}
+
 func (s *Store) CSRFToken(token string) (string, error) {
 	if _, err := s.Resolve(token); err != nil {
 		return "", err

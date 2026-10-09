@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -52,6 +53,7 @@ type EmbeddingStore struct {
 	vaultName string
 	model     string
 	logger    *zap.Logger
+	policy    ContentPolicy
 }
 
 // NewEmbeddingStore preserves the original personal-vault constructor.
@@ -59,10 +61,17 @@ func NewEmbeddingStore(infer EmbedClient, vr Reader, vaultDir string, logger *za
 	return NewScopedEmbeddingStore(infer, vr, vaultDir, "personal", "bge-m3", logger)
 }
 func NewScopedEmbeddingStore(infer EmbedClient, vr Reader, vaultDir, vaultName, model string, logger *zap.Logger) *EmbeddingStore {
+	return NewScopedEmbeddingStoreWithPolicy(infer, vr, vaultDir, vaultName, model, logger, ContentPolicy{})
+}
+
+func NewScopedEmbeddingStoreWithPolicy(infer EmbedClient, vr Reader, vaultDir, vaultName, model string, logger *zap.Logger, policy ContentPolicy) *EmbeddingStore {
+	if root, ok := policy.roots[vaultName]; ok {
+		vaultDir = root
+	}
 	if model == "" {
 		model = "bge-m3"
 	}
-	return &EmbeddingStore{infer: infer, vr: vr, vaultDir: vaultDir, vaultName: vaultName, model: model, logger: logger}
+	return &EmbeddingStore{infer: infer, vr: vr, vaultDir: vaultDir, vaultName: vaultName, model: model, logger: logger, policy: policy}
 }
 func (es *EmbeddingStore) Warmup() {
 	es.WarmupContext(context.Background())
@@ -100,6 +109,9 @@ func (es *EmbeddingStore) Search(ctx context.Context, query string, k int) ([]Em
 	defer es.mu.RUnlock()
 	var results []EmbeddingResult
 	for _, ec := range es.chunks {
+		if !es.policy.Allows(es.vaultName, ec.chunk.PagePath) {
+			continue
+		}
 		score := CosineSimilarity32(vec, ec.embedding)
 		if score > embeddingMinScore {
 			results = append(results, EmbeddingResult{PagePath: ec.chunk.PagePath, Title: ec.chunk.PageTitle, Score: float64(score), ChunkContent: ec.chunk.Content, SectionTitle: ec.chunk.SectionTitle})
@@ -123,7 +135,7 @@ func (es *EmbeddingStore) ensureIndexed(ctx context.Context) error {
 	if es.vaultName != "personal" && es.vaultName != "agent" {
 		return fmt.Errorf("unknown embedding vault %q", es.vaultName)
 	}
-	manifest, err := markdownFiles(es.vaultDir, systemFiles)
+	manifest, err := es.policy.markdownFiles(es.vaultDir, es.vaultName)
 	if err != nil {
 		return err
 	}
@@ -139,7 +151,7 @@ func (es *EmbeddingStore) ensureIndexed(ctx context.Context) error {
 		data, err := readRootFile(es.vaultDir, filepath.Join(embeddingCacheDir, embeddingCacheFileName))
 		if err == nil && json.Unmarshal(data, &cache) == nil && cache.Version == embeddingCacheVersion && cache.Model == es.model && cache.Vault == es.vaultName {
 			for _, entry := range cache.Entries {
-				if len(entry.Embedding) > 0 && entry.ContentHash == hashContent(entry.Chunk.Content) {
+				if es.policy.Allows(es.vaultName, entry.Chunk.PagePath) && len(entry.Embedding) > 0 && entry.ContentHash == hashContent(entry.Chunk.Content) {
 					reusable[chunkKey(entry.Chunk)] = entry.Embedding
 				}
 			}
@@ -152,12 +164,21 @@ func (es *EmbeddingStore) ensureIndexed(ctx context.Context) error {
 	sort.Strings(paths)
 	var rebuilt []embeddedChunk
 	for _, path := range paths {
+		if !es.policy.Allows(es.vaultName, path) {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		page, err := es.vr.ReadPage(ctx, es.vaultName, path)
+		if errors.Is(err, ErrInvalidFrontmatter) {
+			continue
+		}
 		if err != nil {
 			return err
+		}
+		if IsInternalPage(page) {
+			continue
 		}
 		for _, chunk := range ChunkPage(page) {
 			chunk.PagePath = path

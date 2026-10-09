@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -111,7 +112,13 @@ func (s *VaultSearchStep) Run(ctx context.Context, state *ChainState) error {
 			continue
 		}
 		page, err := s.reader.ReadPage(ctx, vaultName, m.Path)
-		if err != nil || vault.IsInternalPage(page) {
+		if errors.Is(err, vault.ErrInvalidFrontmatter) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read search result %s: %w", m.Path, err)
+		}
+		if vault.IsInternalPage(page) {
 			continue
 		}
 		body := m.Body
@@ -301,19 +308,21 @@ func (s *ContextAssemblyStep) Run(ctx context.Context, state *ChainState) error 
 	sb.WriteString("浣犲彲浠ュ弬鑰冧互涓嬬煡璇嗗簱鍐呭鏉ュ洖绛旈棶棰?\n\n")
 
 	count := 0
+	var included []VaultSource
 	for _, src := range state.Sources {
 		if count >= s.maxSources {
 			break
 		}
-		if src.Body == "" {
+		if src.Body == "" || vault.IsInternalPage(&vault.Page{Tags: src.Tags, Category: src.Category}) {
 			continue
 		}
+		included = append(included, src)
 		sb.WriteString(fmt.Sprintf("--- %s ---\n%s\n\n", src.Title, src.Body))
 		count++
 	}
 
 	state.Data["system_prompt"] = sb.String()
-	state.Data["context_source_titles"] = sourceTitles(state.Sources[:min(count, len(state.Sources))])
+	state.Data["context_source_titles"] = sourceTitles(included)
 	return nil
 }
 

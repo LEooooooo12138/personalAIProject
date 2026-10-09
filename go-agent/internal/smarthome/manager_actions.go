@@ -27,8 +27,29 @@ func (m *Manager) ConfirmSuggestion(ctx context.Context, id string) (*RuleSugges
 	default:
 		return nil, fmt.Errorf("%w: cannot confirm %s suggestion", ErrSuggestionConflict, suggestion.Status)
 	}
-	if _, err := BuildAutomation(*suggestion); err != nil {
+	automation, err := BuildAutomation(*suggestion)
+	if err != nil {
 		return nil, err
+	}
+	if suggestion.Intent != nil {
+		if err := m.validateIntentEntities(ctx, *suggestion); err != nil {
+			return nil, err
+		}
+	} else {
+		// Legacy explicit payloads have no recorded generation zone, but HA must
+		// still supply a valid current household zone for clock or solar semantics.
+		usesHomeTime := false
+		for _, trigger := range automation.Trigger {
+			usesHomeTime = usesHomeTime || trigger.Platform == "time"
+		}
+		for _, condition := range automation.Condition {
+			usesHomeTime = usesHomeTime || condition.Condition == "sun"
+		}
+		if usesHomeTime {
+			if _, err := m.homeLocation(ctx); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if _, err := m.store.changeSuggestion(id, "applying", id, ""); err != nil {
 		return nil, err
@@ -56,8 +77,17 @@ func (m *Manager) recordConfirmationFailure(id string, cause error) error {
 
 // IgnoreSuggestion only affects an unexecuted suggestion; it never disables an HA rule.
 func (m *Manager) IgnoreSuggestion(id string) (*RuleSuggestion, error) {
+	return m.IgnoreSuggestionContext(context.Background(), id)
+}
+
+// IgnoreSuggestionContext preserves the existing transition while checking a
+// caller revoked during serialization before changing local state.
+func (m *Manager) IgnoreSuggestionContext(ctx context.Context, id string) (*RuleSuggestion, error) {
 	m.actionMu.Lock()
 	defer m.actionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	suggestion, err := m.findSuggestion(id)
 	if err != nil {
 		return nil, err

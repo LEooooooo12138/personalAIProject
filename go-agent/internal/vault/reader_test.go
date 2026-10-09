@@ -50,8 +50,8 @@ func TestParsePage_NoFrontmatter(t *testing.T) {
 		t.Fatalf("ParsePage: %v", err)
 	}
 
-	if page.Title != "untitled" {
-		t.Errorf("title = %q, want untitled", page.Title)
+	if page.Title != "" {
+		t.Errorf("title = %q, want empty title", page.Title)
 	}
 	if page.Body != "Just a plain markdown file.\nNo frontmatter here." {
 		t.Errorf("body = %q", page.Body)

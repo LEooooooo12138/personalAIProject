@@ -91,7 +91,7 @@ func (s *DeviceStore) SaveHistory(entries []HistoryEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	ts := time.Now().UTC().Format("2006-01-02_150405")
+	ts := time.Now().UTC().Format("2006-01-02_150405.000000000")
 	path := filepath.Join(s.basePath, "snapshots", ts+".json")
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
@@ -145,7 +145,7 @@ func (s *DeviceStore) GetHistoryRange(entityID string, start, end time.Time) ([]
 		return all[i].Timestamp.Before(all[j].Timestamp)
 	})
 
-	return all, nil
+	return deduplicateHistory(all), nil
 }
 
 // SaveSuggestions persists rule suggestions.

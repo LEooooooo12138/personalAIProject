@@ -20,7 +20,7 @@ func BuildRAGChatChain(
 	infer inference.Client,
 	model string,
 	embedStore EmbeddingSearcher,
-	triggerEntities []string,
+	triggerProvider TriggerEntityProvider,
 	logger *zap.Logger,
 ) (*ChainRouter, error) {
 
@@ -29,7 +29,7 @@ func BuildRAGChatChain(
 	mainChain := NewChain(
 		"chat",
 		"entity-trigger decision + RAG pipeline",
-		NewEntityTriggerDecideStep(triggerEntities, logger),
+		NewEntityTriggerDecideStep(triggerProvider, logger),
 		NewVaultSearchStep(vr, embedStore, 5, logger),
 		NewPagePreprocessStep(1000),
 		NewContextAssemblyStep(5),
@@ -156,18 +156,18 @@ func BuildCrossLinkChain(
 }
 
 type ChainDeps struct {
-	VaultReader     vault.Reader
-	VaultWriter     vault.Writer
-	Infer           inference.Client
-	Model           string
-	EmbedStore      EmbeddingSearcher
-	PersonalPath    string
-	AgentPath       string
-	Logger          *zap.Logger
-	TriggerEntities []string
-	RRFK            int
-	TopK            int
-	MaxChunkChars   int
+	VaultReader           vault.Reader
+	VaultWriter           vault.Writer
+	Infer                 inference.Client
+	Model                 string
+	EmbedStore            EmbeddingSearcher
+	PersonalPath          string
+	AgentPath             string
+	Logger                *zap.Logger
+	TriggerEntityProvider TriggerEntityProvider
+	RRFK                  int
+	TopK                  int
+	MaxChunkChars         int
 }
 
 func BuildAllChains(deps ChainDeps) (*ChainRouter, error) {
@@ -175,7 +175,7 @@ func BuildAllChains(deps ChainDeps) (*ChainRouter, error) {
 
 	chatRouter, err := BuildRAGChatChain(
 		deps.VaultReader, deps.Infer, deps.Model,
-		deps.EmbedStore, deps.TriggerEntities, deps.Logger,
+		deps.EmbedStore, deps.TriggerEntityProvider, deps.Logger,
 	)
 	if err != nil {
 		return nil, err

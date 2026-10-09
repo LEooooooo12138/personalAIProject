@@ -164,3 +164,128 @@ func TestStreamingFallbackUsesBufferedUpstreamRequest(t *testing.T) {
 		t.Fatalf("fallback lost answer: %q", state.FinalAnswer)
 	}
 }
+
+// Ordinary and auxiliary requests must send the version-supported field, while
+// caller effort settings and unrelated options survive context assembly.
+func TestLLMReasoningDefaultsAndCallerPreferences(t *testing.T) {
+	for _, tc := range []struct{ name, caller, want string }{
+		{"default", `{"temperature":0,"messages":[{"role":"user","content":"hello"}]}`, "none"},
+		{"caller effort", `{"reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`, "high"},
+		{"caller nested", `{"reasoning":{"effort":"low"},"messages":[{"role":"user","content":"hello"}]}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var caller map[string]any
+			if err := json.Unmarshal([]byte(tc.caller), &caller); err != nil {
+				t.Fatal(err)
+			}
+			state := NewChainState("hello", "agent", nil)
+			state.Set("chat_request", caller)
+			body, err := buildChatRequest(state, "fixture", 0.7, 1024, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request map[string]any
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if _, ok := request["reasoning_effort"]; ok {
+					t.Errorf("default overrides nested caller reasoning: %s", body)
+				}
+				if request["reasoning"].(map[string]any)["effort"] != "low" {
+					t.Errorf("nested reasoning lost: %s", body)
+				}
+			} else if request["reasoning_effort"] != tc.want {
+				t.Errorf("upstream reasoning_effort=%v want %s", request["reasoning_effort"], tc.want)
+			}
+			if _, ok := request["thinking"]; ok {
+				t.Errorf("obsolete thinking field sent: %s", body)
+			}
+			if _, ok := caller["reasoning_effort"]; ok && tc.name == "default" {
+				t.Error("caller request mutated")
+			}
+		})
+	}
+	for _, kind := range []string{"summarize", "ingest", "synthesize", "cross-link"} {
+		t.Run(kind, func(t *testing.T) {
+			received := make(chan map[string]any, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				json.NewDecoder(r.Body).Decode(&request)
+				received <- request
+				fmt.Fprint(w, `{"choices":[{"message":{"content":"fixture result"}}]}`)
+			}))
+			defer server.Close()
+			client := inference.NewOllamaClient(server.URL, time.Second)
+			var step Step
+			switch kind {
+			case "summarize":
+				step = NewLLMSummarizeStep(client, "fixture", zap.NewNop())
+			case "ingest":
+				step = NewLLMIngestStep(client, "fixture", zap.NewNop())
+			case "synthesize":
+				step = NewLLMSynthesizeStep(client, "fixture", zap.NewNop())
+			case "cross-link":
+				step = NewLLMCrossLinkStep(client, "fixture", zap.NewNop())
+			}
+			state := NewChainState("hello", "agent", nil)
+			state.Sources = []VaultSource{{Title: "A", Body: "alpha"}, {Title: "B", Body: "beta"}}
+			if err := step.Run(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+			request := <-received
+			if request["reasoning_effort"] != "none" {
+				t.Errorf("auxiliary reasoning default missing: %v", request)
+			}
+			if _, ok := request["thinking"]; ok {
+				t.Error("auxiliary request uses ignored thinking.type")
+			}
+		})
+	}
+}
+
+func TestLLMAuxiliaryPreservesExplicitReasoning(t *testing.T) {
+	for _, kind := range []string{"summarize", "ingest", "synthesize", "cross-link"} {
+		for _, nested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/nested=%v", kind, nested), func(t *testing.T) {
+				client := &recordingInference{}
+				var step Step
+				switch kind {
+				case "summarize":
+					step = NewLLMSummarizeStep(client, "fixture", zap.NewNop())
+				case "ingest":
+					step = NewLLMIngestStep(client, "fixture", zap.NewNop())
+				case "synthesize":
+					step = NewLLMSynthesizeStep(client, "fixture", zap.NewNop())
+				case "cross-link":
+					step = NewLLMCrossLinkStep(client, "fixture", zap.NewNop())
+				}
+				caller := map[string]interface{}{"reasoning_effort": "high"}
+				if nested {
+					caller = map[string]interface{}{"reasoning": map[string]interface{}{"effort": "low"}}
+				}
+				state := NewChainState("hello", "agent", nil)
+				state.Set("chat_request", caller)
+				state.Sources = []VaultSource{{Title: "A", Body: "alpha"}, {Title: "B", Body: "beta"}}
+				if err := step.Run(context.Background(), state); err != nil {
+					t.Fatal(err)
+				}
+				var req map[string]interface{}
+				if err := json.Unmarshal([]byte(client.requests[0]), &req); err != nil {
+					t.Fatal(err)
+				}
+				if nested {
+					if _, ok := req["reasoning_effort"]; ok {
+						t.Errorf("auxiliary default overrides nested caller effort: %v", req)
+					}
+					options, ok := req["reasoning"].(map[string]interface{})
+					if !ok || options["effort"] != "low" {
+						t.Errorf("auxiliary request lost nested caller effort: %v", req)
+					}
+				} else if req["reasoning_effort"] != "high" {
+					t.Errorf("auxiliary request overwrites explicit effort: %v", req)
+				}
+			})
+		}
+	}
+}

@@ -42,7 +42,7 @@ func newAccessControl(key string) *accessControl {
 func (a *accessControl) middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if path == "/health" || path == "/chat" || strings.HasPrefix(path, "/chat/") || path == "/auth/browser" {
+		if path == "/health" || path == "/chat" || strings.HasPrefix(path, "/chat/") || path == "/app" || strings.HasPrefix(path, "/app/") || path == "/auth/browser" {
 			c.Next()
 			return
 		}
@@ -62,6 +62,10 @@ func (a *accessControl) middleware() gin.HandlerFunc {
 			}
 		}
 		if !p.Admin && (!browserRoute || p.Owner == "") {
+			if isConsoleManagementPath(path) {
+				consoleError(c, 401, "unauthenticated", "Authentication required")
+				return
+			}
 			c.AbortWithStatusJSON(401, gin.H{"error": "authentication required"})
 			return
 		}

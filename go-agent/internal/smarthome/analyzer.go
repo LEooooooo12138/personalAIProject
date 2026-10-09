@@ -29,69 +29,75 @@ func NewAnalyzer(store *DeviceStore, logger *zap.Logger) *Analyzer {
 }
 
 // Analyze runs all pattern detectors and returns a DeviceReport.
-func (a *Analyzer) Analyze(endTime time.Time, lookbackDays int) (*DeviceReport, error) {
-	startTime := endTime.AddDate(0, 0, -lookbackDays)
-
-	// Keep earlier state transitions to know whether an entity was already on
-	// at the left edge of this window. Pattern detection still uses only the window.
-	entries, err := a.store.GetHistoryRange("", time.Time{}, endTime)
+func (a *Analyzer) Analyze(now time.Time, lookbackDays int) (*DeviceReport, error) {
+	return a.AnalyzeInLocation(now, lookbackDays, time.UTC)
+}
+func (a *Analyzer) AnalyzeInLocation(now time.Time, lookbackDays int, location *time.Location) (*DeviceReport, error) {
+	if location == nil || lookbackDays < 1 || lookbackDays > 366 {
+		return nil, fmt.Errorf("explicit valid home timezone and 1-366 days required")
+	}
+	local := now.In(location)
+	end := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+	start := end.AddDate(0, 0, -lookbackDays)
+	entries, err := a.store.GetHistoryRange("", time.Time{}, end)
 	if err != nil {
-		return nil, fmt.Errorf("analyze: get history: %w", err)
+		return nil, err
 	}
-	if len(entries) == 0 {
-		return &DeviceReport{
-			PeriodStart: startTime,
-			PeriodEnd:   endTime,
-		}, nil
+	summaries := map[string][]HistoryEntry{}
+	byEntity := map[string][]HistoryEntry{}
+	for _, entry := range entries {
+		if !entry.Timestamp.Before(end) {
+			continue
+		}
+		entry.Timestamp = entry.Timestamp.In(location)
+		summaries[entry.EntityID] = append(summaries[entry.EntityID], entry)
 	}
-
-	// Group entries by entity.
-	byEntity := make(map[string][]HistoryEntry)
-	summaryEntries := make(map[string][]HistoryEntry)
-	for _, e := range entries {
-		summaryEntries[e.EntityID] = append(summaryEntries[e.EntityID], e)
-		if !e.Timestamp.Before(startTime) {
-			byEntity[e.EntityID] = append(byEntity[e.EntityID], e)
+	report := &DeviceReport{PeriodStart: start, PeriodEnd: end}
+	var ids []string
+	for id := range summaries {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		for _, entry := range summaries[id] {
+			if !entry.Timestamp.Before(start) {
+				byEntity[id] = append(byEntity[id], entry)
+			}
+		}
+		// Extract before clipping so a verified preceding baseline remains available.
+		var ons []HistoryEntry
+		for _, entry := range turnOnEntries(summaries[id]) {
+			if !entry.Timestamp.Before(start) {
+				ons = append(ons, entry)
+			}
+		}
+		if isBinaryDevice(id) {
+			report.Patterns = append(report.Patterns, a.timePatternsFromTransitions(id, ons, lookbackDays)...)
+		}
+		if isSensorDevice(id) {
+			report.Patterns = append(report.Patterns, a.detectAnomalies(id, byEntity[id])...)
 		}
 	}
-
-	report := &DeviceReport{
-		PeriodStart: startTime,
-		PeriodEnd:   endTime,
-	}
-
-	// Detect patterns per entity.
-	for entityID, entEntries := range byEntity {
-		a.logger.Debug("analyzing entity", zap.String("entity", entityID), zap.Int("entries", len(entEntries)))
-
-		// Time pattern detection for binary devices (lights, switches).
-		if isBinaryDevice(entityID) {
-			patterns := a.detectTimePatterns(entityID, entEntries, lookbackDays)
-			report.Patterns = append(report.Patterns, patterns...)
-		}
-
-		// Anomaly detection for sensor devices.
-		if isSensorDevice(entityID) {
-			anomalies := a.detectAnomalies(entityID, entEntries)
-			report.Patterns = append(report.Patterns, anomalies...)
+	// Correlations share the same verified transitions and completed-day window.
+	verified := map[string][]HistoryEntry{}
+	for id, es := range summaries {
+		for _, e := range turnOnEntries(es) {
+			if !e.Timestamp.Before(start) {
+				verified[id] = append(verified[id], e)
+			}
 		}
 	}
-
-	// Detect correlation patterns between entities.
-	correlations := a.detectCorrelations(byEntity, lookbackDays)
-	report.Patterns = append(report.Patterns, correlations...)
-
-	// Generate rule suggestions from detected patterns.
-	report.Suggestions = a.generateSuggestions(report.Patterns)
-
-	// Build device summaries.
-	report.Devices = a.buildSummaries(summaryEntries, lookbackDays, startTime, endTime)
-
+	report.Patterns = append(report.Patterns, a.correlationsFromTransitions(verified, lookbackDays)...)
+	report.Suggestions = a.generateSuggestionsInLocation(report.Patterns, location)
+	report.Devices = a.buildSummaries(summaries, lookbackDays, start, end)
 	return report, nil
 }
 
 // detectTimePatterns finds regular on/off time patterns for a device.
 func (a *Analyzer) detectTimePatterns(entityID string, entries []HistoryEntry, lookbackDays int) []DetectedPattern {
+	return a.timePatternsFromTransitions(entityID, turnOnEntries(entries), lookbackDays)
+}
+func (a *Analyzer) timePatternsFromTransitions(entityID string, entries []HistoryEntry, lookbackDays int) []DetectedPattern {
 	var patterns []DetectedPattern
 
 	// Collect "turned on" events with their hour of day.
@@ -126,7 +132,8 @@ func (a *Analyzer) detectTimePatterns(entityID string, entries []HistoryEntry, l
 	}
 
 	// Find hours that have consistent daily patterns.
-	for hour, count := range hourCounts {
+	for hour := 0; hour < 24; hour++ {
+		count := hourCounts[hour]
 		uniqueDays := len(hourDays[hour])
 		if uniqueDays < a.minDays {
 			continue
@@ -202,107 +209,73 @@ func (a *Analyzer) detectAnomalies(entityID string, entries []HistoryEntry) []De
 	return patterns
 }
 
-// detectCorrelations finds pairs of entities that change state close together.
-func (a *Analyzer) detectCorrelations(byEntity map[string][]HistoryEntry, lookbackDays int) []DetectedPattern {
-	var patterns []DetectedPattern
-
-	entityIDs := make([]string, 0, len(byEntity))
-	for id := range byEntity {
-		entityIDs = append(entityIDs, id)
+// Ordered pairs are independent: A->B does not imply B->A.
+func (a *Analyzer) detectCorrelations(byEntity map[string][]HistoryEntry, days int) []DetectedPattern {
+	verified := map[string][]HistoryEntry{}
+	for id, entries := range byEntity {
+		verified[id] = turnOnEntries(entries)
 	}
-
-	// Compare each pair of entities.
-	for i := 0; i < len(entityIDs); i++ {
-		for j := i + 1; j < len(entityIDs); j++ {
-			ea := entityIDs[i]
-			eb := entityIDs[j]
-
-			// Skip if both are the same type (not useful).
-			if isSensorDevice(ea) && isSensorDevice(eb) {
+	return a.correlationsFromTransitions(verified, days)
+}
+func (a *Analyzer) correlationsFromTransitions(byEntity map[string][]HistoryEntry, days int) []DetectedPattern {
+	var ids []string
+	for id := range byEntity {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var patterns []DetectedPattern
+	for _, source := range ids {
+		for _, target := range ids {
+			if source == target {
 				continue
 			}
-
-			entriesA := byEntity[ea]
-			entriesB := byEntity[eb]
-
-			// Count events where B changes within 5 minutes after A.
-			correlations := 0
-			totalA := 0
-			for _, eA := range entriesA {
-				if !strings.Contains(strings.ToLower(eA.State), "on") {
-					continue
-				}
-				totalA++
-				for _, eB := range entriesB {
-					diff := eB.Timestamp.Sub(eA.Timestamp)
-					if diff > 0 && diff < 5*time.Minute {
-						if strings.Contains(strings.ToLower(eB.State), "on") {
-							correlations++
-							break
-						}
+			hits := 0
+			hitDays := map[string]bool{}
+			total := len(byEntity[source])
+			for _, from := range byEntity[source] {
+				for _, to := range byEntity[target] {
+					delta := to.Timestamp.Sub(from.Timestamp)
+					if delta > 0 && delta < 5*time.Minute {
+						hits++
+						hitDays[from.Timestamp.Format("2006-01-02")] = true
+						break
 					}
 				}
 			}
-
-			if totalA >= a.minDays && correlations > 0 {
-				hitRate := float64(correlations) / float64(totalA)
-				if hitRate >= a.minHitRate {
-					patterns = append(patterns, DetectedPattern{
-						Type:      "correlation",
-						EntityID:  ea,
-						RelatedID: eb,
-						Description: fmt.Sprintf("When %s turns on, %s follows within 5 minutes %.0f%% of the time",
-							ea, eb, hitRate*100),
-						Confidence: hitRate,
-						SampleSize: correlations,
-						PeriodDays: lookbackDays,
-					})
-				}
+			if total == 0 || len(hitDays) < a.minDays {
+				continue
 			}
+			confidence := float64(hits) / float64(total)
+			if confidence < a.minHitRate {
+				continue
+			}
+			patterns = append(patterns, DetectedPattern{Type: "correlation", EntityID: source, RelatedID: target, Description: fmt.Sprintf("When %s changes off to on, %s changes off to on within 5 minutes %.0f%% of the time", source, target, confidence*100), Confidence: confidence, SampleSize: hits, PeriodDays: days})
 		}
 	}
-
 	return patterns
 }
 
 // generateSuggestions creates RuleSuggestion from detected patterns.
 func (a *Analyzer) generateSuggestions(patterns []DetectedPattern) []RuleSuggestion {
+	return a.generateSuggestionsInLocation(patterns, time.UTC)
+}
+func (a *Analyzer) generateSuggestionsInLocation(patterns []DetectedPattern, location *time.Location) []RuleSuggestion {
 	var suggestions []RuleSuggestion
-	now := time.Now()
-
 	for _, p := range patterns {
-		switch p.Type {
-		case "time":
-			suggestions = append(suggestions, RuleSuggestion{
-				Title:       fmt.Sprintf("Scheduled: Turn on %s at %s", friendlyName(p.EntityID), p.TimeOfDay),
-				Description: p.Description,
-				Trigger:     p.TimeOfDay,
-				Condition:   "someone is home",
-				Action:      p.EntityID,
-				Confidence:  p.Confidence,
-				DataSource:  fmt.Sprintf("%d-day history, %.0f%% hit rate", p.PeriodDays, p.Confidence*100),
-				CreatedAt:   now,
-				Status:      "pending",
-			})
-
-		case "correlation":
-			suggestions = append(suggestions, RuleSuggestion{
-				Title:       fmt.Sprintf("Auto: When %s opens, turn on %s", friendlyName(p.EntityID), friendlyName(p.RelatedID)),
-				Description: p.Description,
-				Trigger:     fmt.Sprintf("state change: %s", p.EntityID),
-				Condition:   fmt.Sprintf("time is between sunset and midnight"),
-				Action:      p.RelatedID,
-				Confidence:  p.Confidence,
-				DataSource:  fmt.Sprintf("%d-day history, %.0f%% hit rate", p.PeriodDays, p.Confidence*100),
-				CreatedAt:   now,
-				Status:      "pending",
-			})
+		if p.Type != "time" && p.Type != "correlation" {
+			continue
 		}
+		intent := &SuggestionIntent{SchemaVersion: 1, Kind: p.Type, EntityID: p.EntityID, RelatedID: p.RelatedID, At: p.TimeOfDay, TimeZone: location.String()}
+		if p.Type == "time" {
+			intent.RequiredConditions = []string{"presence_home"}
+		} else {
+			intent.RequiredConditions = []string{"sunset_to_midnight"}
+		}
+		s := RuleSuggestion{Intent: intent, Description: p.Description, Confidence: p.Confidence, DataSource: fmt.Sprintf("%d-day history, %.0f%% hit rate", p.PeriodDays, p.Confidence*100), CreatedAt: time.Now(), Status: "pending"}
+		renderSuggestion(&s)
+		s.ID = stableSuggestionID(s)
+		suggestions = append(suggestions, s)
 	}
-	for i := range suggestions {
-		suggestions[i].ID = stableSuggestionID(suggestions[i])
-	}
-
 	return suggestions
 }
 
@@ -315,7 +288,7 @@ func (a *Analyzer) buildSummaries(byEntity map[string][]HistoryEntry, lookbackDa
 		var totalOnSeconds float64
 		var previousAt time.Time
 
-		ordered := append([]HistoryEntry(nil), entries...)
+		ordered := unambiguousHistory(entries)
 		sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Timestamp.Before(ordered[j].Timestamp) })
 		lastState := ""
 		addOnInterval := func(from, to time.Time) {
@@ -337,14 +310,6 @@ func (a *Analyzer) buildSummaries(byEntity map[string][]HistoryEntry, lookbackDa
 				addOnInterval(previousAt, e.Timestamp)
 			}
 			state := strings.ToLower(e.State)
-			if !e.Timestamp.Before(startTime) && state != lastState {
-				if state == "on" {
-					onCount++
-				}
-				if state == "off" {
-					offCount++
-				}
-			}
 			lastState = state
 			previousAt = e.Timestamp
 		}
@@ -352,6 +317,16 @@ func (a *Analyzer) buildSummaries(byEntity map[string][]HistoryEntry, lookbackDa
 			addOnInterval(previousAt, endTime)
 		}
 
+		for _, transition := range stateTransitions(entries) {
+			if !transition.At.Before(startTime) && transition.At.Before(endTime) {
+				if transition.From == "off" && transition.To == "on" {
+					onCount++
+				}
+				if transition.From == "on" && transition.To == "off" {
+					offCount++
+				}
+			}
+		}
 		avgOnHour := totalOnSeconds / 3600.0 / float64(max(1, lookbackDays))
 
 		summaries = append(summaries, DeviceSummary{

@@ -2,6 +2,7 @@ package smarthome
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -11,9 +12,13 @@ import (
 
 // Manager coordinates the smart home subsystem: data collection, analysis,
 // and rule suggestion.
+var ErrAnalysisBusy = errors.New("analysis busy")
+
 type Manager struct {
+	analysisMu  sync.Mutex
 	cfg         HAConfig
 	client      *HomeAssistantClient
+	catalog     *CatalogService
 	store       *DeviceStore
 	collector   *Collector
 	analyzer    *Analyzer
@@ -32,6 +37,18 @@ func NewManager(cfg HAConfig, logger *zap.Logger) (*Manager, error) {
 		cfg.PollIntervalSec = 3600
 	}
 	client := NewHomeAssistantClient(cfg.BaseURL, cfg.Token, 30*time.Second)
+	if cfg.OAuthCredentialsFile != "" {
+		if cfg.Token != "" {
+			client.Close()
+			return nil, fmt.Errorf("smarthome manager: conflicting authentication configuration")
+		}
+		provider, err := NewOAuthTokenProvider(cfg.BaseURL, cfg.OAuthCredentialsFile, 10*time.Second)
+		if err != nil {
+			client.Close()
+			return nil, fmt.Errorf("smarthome manager: OAuth configuration: %w", err)
+		}
+		client.tokenProvider = provider
+	}
 
 	vaultPath := cfg.AgentVaultPath
 	if vaultPath == "" {
@@ -40,6 +57,7 @@ func NewManager(cfg HAConfig, logger *zap.Logger) (*Manager, error) {
 
 	store, err := NewDeviceStore(vaultPath)
 	if err != nil {
+		client.Close()
 		return nil, fmt.Errorf("smarthome manager: %w", err)
 	}
 
@@ -51,6 +69,7 @@ func NewManager(cfg HAConfig, logger *zap.Logger) (*Manager, error) {
 		logger:   logger,
 	}
 
+	m.catalog = NewCatalogService(context.Background(), client)
 	m.collector = NewCollector(client, store, cfg.PollIntervalSec, logger)
 
 	return m, nil
@@ -65,6 +84,7 @@ func (m *Manager) Start(ctx context.Context) {
 	}
 	ctx, m.cancel = context.WithCancel(ctx)
 	m.started = true
+	context.AfterFunc(ctx, m.catalog.Close)
 	m.collector.Start(ctx)
 
 	m.workers.Add(1)
@@ -88,6 +108,8 @@ func (m *Manager) Stop() {
 		m.cancel()
 	}
 	m.lifecycleMu.Unlock()
+	m.client.Close()
+	m.catalog.Close()
 	m.collector.Stop()
 	m.workers.Wait()
 	m.logger.Info("smarthome manager stopped")
@@ -96,7 +118,17 @@ func (m *Manager) Stop() {
 // dailyAnalysisLoop runs at the configured analysis hour each day.
 func (m *Manager) dailyAnalysisLoop(ctx context.Context) {
 	for {
-		next := nextAnalysisTime(m.cfg.AnalysisHour)
+		location, err := m.homeLocation(ctx)
+		if err != nil {
+			m.logger.Warn("cannot schedule household analysis", zap.Error(err))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute):
+				continue
+			}
+		}
+		next := nextAnalysisTime(time.Now(), m.cfg.AnalysisHour, location)
 		m.logger.Debug("smarthome: next analysis scheduled", zap.Time("at", next))
 
 		select {
@@ -149,13 +181,21 @@ func (m *Manager) GetAnalyzer() *Analyzer {
 
 // TriggerAnalysis manually runs analysis and returns the report.
 func (m *Manager) TriggerAnalysis(ctx context.Context, lookbackDays int) (*DeviceReport, error) {
+	if !m.analysisMu.TryLock() {
+		return nil, ErrAnalysisBusy
+	}
+	defer m.analysisMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if lookbackDays < 1 || lookbackDays > 366 {
 		return nil, fmt.Errorf("lookback days must be between 1 and 366")
 	}
-	report, err := m.analyzer.Analyze(time.Now(), lookbackDays)
+	location, err := m.homeLocation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	report, err := m.analyzer.AnalyzeInLocation(time.Now(), lookbackDays, location)
 	if err != nil {
 		return nil, err
 	}
@@ -186,11 +226,14 @@ func (m *Manager) TriggerAnalysis(ctx context.Context, lookbackDays int) (*Devic
 }
 
 // nextAnalysisTime calculates the next occurrence of the specified hour.
-func nextAnalysisTime(hour int) time.Time {
-	now := time.Now()
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location())
-	if now.After(next) {
-		next = next.Add(24 * time.Hour)
+func nextAnalysisTime(now time.Time, hour int, location *time.Location) time.Time {
+	local := now.In(location)
+	next := time.Date(local.Year(), local.Month(), local.Day(), hour, 0, 0, 0, location)
+	if !next.After(now) {
+		day := time.Date(local.Year(), local.Month(), local.Day()+1, 12, 0, 0, 0, location)
+		next = time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, location)
 	}
 	return next
 }
+
+func (m *Manager) Catalog(ctx context.Context) (CatalogSnapshot, error) { return m.catalog.Get(ctx) }

@@ -15,23 +15,18 @@ import (
 // SubscribeEvents connects to the HA WebSocket API and forwards events to the handler.
 // This method blocks until ctx is cancelled or the connection is lost.
 func (c *HomeAssistantClient) SubscribeEvents(ctx context.Context, handler EventHandler) error {
-	wsURL := strings.Replace(c.BaseURL, "http", "ws", 1) + "/api/websocket"
-
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, http.Header{})
+	conn, cleanup, err := c.openAuthenticatedWS(ctx)
 	if err != nil {
-		return fmt.Errorf("smarthome: ws dial: %w", err)
+		return err
 	}
-	defer conn.Close()
-
-	// Step 1: wait for auth_required message
-	if err := c.wsAuth(ctx, conn); err != nil {
-		return fmt.Errorf("smarthome: ws auth: %w", err)
-	}
+	defer cleanup()
+	conn.SetReadDeadline(time.Time{})
+	conn.SetWriteDeadline(time.Time{})
 
 	// Step 2: subscribe to state_changed events
 	subscribeMsg := map[string]interface{}{
-		"id":   2,
-		"type": "subscribe_events",
+		"id":         2,
+		"type":       "subscribe_events",
 		"event_type": "state_changed",
 	}
 	if err := conn.WriteJSON(subscribeMsg); err != nil {
@@ -83,8 +78,16 @@ func (c *HomeAssistantClient) SubscribeEvents(ctx context.Context, handler Event
 }
 
 func (c *HomeAssistantClient) wsAuth(ctx context.Context, conn *websocket.Conn) error {
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return err
+	}
 	// Read the initial auth_required message
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	deadline := time.Now().Add(10 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	conn.SetReadDeadline(deadline)
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		return fmt.Errorf("read auth_required: %w", err)
@@ -92,20 +95,23 @@ func (c *HomeAssistantClient) wsAuth(ctx context.Context, conn *websocket.Conn) 
 
 	var authMsg HAEvent
 	if err := json.Unmarshal(msg, &authMsg); err != nil {
-		return fmt.Errorf("parse auth_required: %w", err)
+		return newHAError("ha_invalid_response")
 	}
 
+	if authMsg.Type != "auth_required" {
+		return newHAError("ha_invalid_response")
+	}
 	// Send auth
 	authReq := map[string]interface{}{
-		"type":        "auth",
-		"access_token": c.Token,
+		"type":         "auth",
+		"access_token": token,
 	}
 	if err := conn.WriteJSON(authReq); err != nil {
 		return fmt.Errorf("write auth: %w", err)
 	}
 
 	// Read auth response
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	conn.SetReadDeadline(deadline)
 	_, authResp, err := conn.ReadMessage()
 	if err != nil {
 		return fmt.Errorf("read auth response: %w", err)
@@ -113,14 +119,51 @@ func (c *HomeAssistantClient) wsAuth(ctx context.Context, conn *websocket.Conn) 
 
 	var authResult HAEvent
 	if err := json.Unmarshal(authResp, &authResult); err != nil {
-		return fmt.Errorf("parse auth result: %w", err)
+		return newHAError("ha_invalid_response")
 	}
 
 	if authResult.Type == "auth_ok" {
 		return nil
 	}
 	if authResult.Type == "auth_invalid" {
-		return fmt.Errorf("smarthome: invalid token")
+		if c.tokenProvider != nil {
+			c.tokenProvider.Invalidate(token)
+		}
+		return newHAError("ha_auth_required")
 	}
-	return fmt.Errorf("smarthome: unexpected auth response: %s", string(authResp))
+	return newHAError("ha_invalid_response")
+}
+
+// Authentication may retry before any application command has been sent.
+func (c *HomeAssistantClient) openAuthenticatedWS(ctx context.Context) (*websocket.Conn, func(), error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		conn, resp, e := websocket.DefaultDialer.DialContext(ctx, strings.Replace(c.BaseURL, "http", "ws", 1)+"/api/websocket", http.Header{})
+		if e != nil {
+			if resp != nil {
+				resp.Body.Close()
+				return nil, func() {}, haStatusError(resp.StatusCode)
+			}
+			return nil, func() {}, safeHAError(e)
+		}
+		stop := context.AfterFunc(ctx, func() { conn.Close() })
+		cleanup := func() { stop(); conn.Close() }
+		deadline := time.Now().Add(10 * time.Second)
+		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+			deadline = d
+		}
+		conn.SetWriteDeadline(deadline)
+		e = c.wsAuth(ctx, conn)
+		if e == nil {
+			return conn, cleanup, nil
+		}
+		cleanup()
+		if ctx.Err() != nil {
+			return nil, func() {}, ctx.Err()
+		}
+		if attempt == 0 && c.tokenProvider != nil && HAErrorCode(e) == "ha_auth_required" {
+			continue
+		}
+		return nil, func() {}, safeHAError(e)
+	}
+	return nil, func() {}, newHAError("ha_auth_required")
 }

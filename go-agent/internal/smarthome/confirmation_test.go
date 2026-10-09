@@ -23,7 +23,13 @@ type suggestionConfirmer interface {
 
 func confirmationManager(t *testing.T, handler http.HandlerFunc) (*Manager, suggestionConfirmer, string) {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/config" {
+			_, _ = w.Write([]byte(`{"time_zone":"UTC"}`))
+			return
+		}
+		handler(w, r)
+	}))
 	t.Cleanup(server.Close)
 	dir := t.TempDir()
 	m, err := NewManager(HAConfig{BaseURL: server.URL, AgentVaultPath: dir}, zap.NewNop())
@@ -259,7 +265,7 @@ func TestAnalyzeIncludesKnownStateAtWindowBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	end := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
 	start := end.Add(-24 * time.Hour)
 	if err := store.SaveHistory([]HistoryEntry{
 		{EntityID: "light.before", State: "on", Timestamp: start.Add(-time.Hour)},
@@ -307,7 +313,9 @@ func TestManagerDefaultPollingCanStartAndStop(t *testing.T) {
 }
 
 func TestAnalysisReturnsPersistedDecision(t *testing.T) {
-	m, err := NewManager(HAConfig{AgentVaultPath: t.TempDir()}, zap.NewNop())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"time_zone":"UTC"}`)) }))
+	defer server.Close()
+	m, err := NewManager(HAConfig{BaseURL: server.URL, AgentVaultPath: t.TempDir()}, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +324,7 @@ func TestAnalysisReturnsPersistedDecision(t *testing.T) {
 	for day := 1; day <= 7; day++ {
 		at := end.AddDate(0, 0, -day)
 		at = time.Date(at.Year(), at.Month(), at.Day(), 18, 0, 0, 0, at.Location())
-		history = append(history, HistoryEntry{EntityID: "light.kitchen", State: "on", Timestamp: at})
+		history = append(history, HistoryEntry{EntityID: "light.kitchen", State: "off", Timestamp: at.Add(-time.Minute), ObservationKind: "initial"}, HistoryEntry{EntityID: "light.kitchen", State: "on", Timestamp: at, ObservationKind: "change"})
 	}
 	if err := m.store.SaveHistory(history); err != nil {
 		t.Fatal(err)

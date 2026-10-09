@@ -3,6 +3,9 @@ package chain
 import (
 	"context"
 	"fmt"
+	"github.com/yuanleyao/ai-agent/internal/vault"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,7 +15,11 @@ import (
 
 func TestEntityRoutingDoesNotLogUserText(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
-	step := NewEntityTriggerDecideStep([]string{"project"}, zap.New(core))
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "project.md"), []byte("---\ntitle: project\ncategory: project\n---\npublic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	step := NewEntityTriggerDecideStep(vault.NewFileReader(root, root), zap.New(core))
 	state := NewChainState("project password=private-fixture", "agent", nil)
 	if err := step.Run(context.Background(), state); err != nil {
 		t.Fatal(err)

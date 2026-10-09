@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"strings"
 	"unicode/utf8"
 )
@@ -39,6 +40,28 @@ func (s *Store) GetSharing() (Sharing, error) {
 func (s *Store) PutSharing(expectedRevision uint64, entities, suggestions []string) (Sharing, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.putSharingLocked(expectedRevision, entities, suggestions)
+}
+
+// PutSharingForSession orders the short local policy commit against logout,
+// password changes, disablement and expiry. No network work runs under this lock.
+func (s *Store) PutSharingForSession(ctx context.Context, token string, expectedRevision uint64, entities, suggestions []string) (Sharing, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Sharing{}, err
+	}
+	p, _, err := s.resolveLocked(token)
+	if err != nil {
+		return Sharing{}, err
+	}
+	if p.Role != "admin" || p.MustChangePassword {
+		return Sharing{}, ErrForbidden
+	}
+	return s.putSharingLocked(expectedRevision, entities, suggestions)
+}
+
+func (s *Store) putSharingLocked(expectedRevision uint64, entities, suggestions []string) (Sharing, error) {
 	if err := s.checkAvailableLocked(); err != nil {
 		return Sharing{}, err
 	}

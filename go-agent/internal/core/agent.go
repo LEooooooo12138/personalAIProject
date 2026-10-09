@@ -90,6 +90,12 @@ func (a *Agent) handleMessageContext(ctx context.Context, msg channel.Message) {
 		zap.String("user", msg.UserID),
 	)
 
+	release, err := a.sessionMgr.AcquireTurn(ctx, msg.ChannelID, msg.UserID)
+	if err != nil {
+		return
+	}
+	defer release()
+
 	session, err := a.sessionMgr.GetOrCreate(msg.ChannelID, msg.UserID)
 	if err != nil {
 		a.logger.Error("session create failed", zap.Error(err))
@@ -184,7 +190,7 @@ func (a *Agent) consumeSessionEnds(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case session := <-a.sessionMgr.EndChan():
-			if a.sedimenter == nil {
+			if session.ChannelID == "console" || a.sedimenter == nil {
 				a.sessionMgr.CompleteSession(session)
 				continue
 			}

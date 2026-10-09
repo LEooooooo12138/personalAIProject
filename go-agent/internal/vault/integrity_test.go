@@ -242,8 +242,8 @@ func TestEntityExtractionDoesNotFollowOutsideSymlink(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	entities, err := ExtractTriggerEntities(root, nil)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("outside symlink failure was swallowed")
 	}
 	if len(entities) != 0 {
 		t.Fatalf("read external source through symlink: %+v", entities)

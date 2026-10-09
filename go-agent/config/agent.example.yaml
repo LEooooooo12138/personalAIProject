@@ -2,10 +2,22 @@
 # the application does not automatically load config/.env.
 server:
   port: 8080
+  # Empty keeps the legacy :port listener. For local console use 127.0.0.1:8080;
+  # direct LAN access requires an explicit LAN address or 0.0.0.0:8080.
+  listen_address: ""
   internal_key: "${AGENT_INTERNAL_KEY}"
   shutdown_timeout: 10s
   chain_timeout: 300s
   search_timeout: 30s
+
+# Console is local, optional, and uses its own accounts/cookies.
+# Keep data_dir outside both Vault roots and the ./static directory.
+# See docs/console-local-setup.md for initialization with a password prompt.
+console:
+  enabled: false
+  data_dir: "./data/console"
+  public_origin: "http://127.0.0.1:8080"
+  allow_insecure_http: false
 
 inference:
   endpoint: "http://localhost:11434"
@@ -57,9 +69,14 @@ channels:
 smarthome:
   enabled: false
   base_url: "http://localhost:8123"
+  # Alternative to token: an existing protected HA OAuth grant JSON file.
+  oauth_credentials_file: ""
   token: "${HA_ACCESS_TOKEN}"
   poll_interval_sec: 3600
   analysis_hour: 3
+  # Optional expectation check only; HA /api/config.time_zone is authoritative.
+  # A mismatch blocks time suggestions and confirmation until resolved.
+  time_zone: ""
 
 logging:
   level: "info"

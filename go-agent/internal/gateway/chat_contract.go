@@ -14,10 +14,30 @@ func parseChatRequest(body []byte) (chatRequest, error) {
 	if err := json.Unmarshal(body, &req.Raw); err != nil || req.Raw == nil {
 		return req, fmt.Errorf("invalid request JSON")
 	}
-	allowed := map[string]bool{"model": true, "messages": true, "metadata": true, "stream": true, "temperature": true, "top_p": true, "max_tokens": true, "stop": true, "seed": true, "presence_penalty": true, "frequency_penalty": true}
+	allowed := map[string]bool{"model": true, "messages": true, "metadata": true, "stream": true, "temperature": true, "top_p": true, "max_tokens": true, "stop": true, "seed": true, "presence_penalty": true, "frequency_penalty": true, "reasoning_effort": true, "reasoning": true}
 	for key := range req.Raw {
 		if !allowed[key] {
 			return req, fmt.Errorf("unsupported field: %s", key)
+		}
+	}
+	validEffort := func(v interface{}) bool {
+		value, ok := v.(string)
+		if !ok {
+			return false
+		}
+		switch value {
+		case "none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max":
+			return true
+		}
+		return false
+	}
+	if value, ok := req.Raw["reasoning_effort"]; ok && !validEffort(value) {
+		return req, fmt.Errorf("invalid reasoning_effort")
+	}
+	if value, ok := req.Raw["reasoning"]; ok {
+		options, valid := value.(map[string]interface{})
+		if !valid || len(options) != 1 || !validEffort(options["effort"]) {
+			return req, fmt.Errorf("invalid reasoning.effort")
 		}
 	}
 	if value, ok := req.Raw["model"]; ok {

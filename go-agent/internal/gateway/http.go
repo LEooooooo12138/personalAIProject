@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
+	"github.com/yuanleyao/ai-agent/internal/console"
 	"github.com/yuanleyao/ai-agent/internal/core"
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
@@ -43,9 +45,15 @@ type Server struct {
 	chainRouter   *chain.ChainRouter
 
 	// Session persistence + vector store.
-	sessionStore *core.SessionStore
-	sedimenter   *memory.Sedimenter
-	smartHome    *smarthome.Manager
+	sessionStore        *core.SessionStore
+	sedimenter          *memory.Sedimenter
+	smartHome           *smarthome.Manager
+	consoleStore        *console.Store
+	consoleConfigErr    error
+	consoleLoginLimiter *consoleLoginLimiter
+	consoleMemberMu     sync.Mutex
+	areaCatalog         consoleCatalogProvider
+	ollamaStatus        *ollamaStatusCache
 }
 
 func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr vault.Reader, vw vault.Writer, chMgr *channel.Manager, coreRouter *core.ModelRouter, filterChain *filter.Chain, sessionMgr *core.SessionManager, embedStore *vault.EmbeddingStore) *Server {
@@ -98,6 +106,7 @@ func NewServerFromApp(app *core.App) *Server {
 		sessionStore:  app.SessionStore,
 		sedimenter:    app.Sedimenter,
 		smartHome:     app.SmartHome,
+		consoleStore:  app.ConsoleStore,
 	}
 	_ = embedStore
 	s.setupRoutes()
@@ -105,7 +114,16 @@ func NewServerFromApp(app *core.App) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s.ollamaStatus != nil {
+		defer s.ollamaStatus.Close()
+	}
+	if err := s.cfg.ValidateConsole(); err != nil {
+		return err
+	}
 	addr := fmt.Sprintf(":%d", s.cfg.Server.Port)
+	if s.cfg.Server.ListenAddress != "" {
+		addr = s.cfg.Server.ListenAddress
+	}
 	s.srv = &http.Server{Addr: addr, Handler: s.engine, BaseContext: func(net.Listener) context.Context { return ctx }}
 
 	errCh := make(chan error, 1)
@@ -131,9 +149,23 @@ func (s *Server) setupRoutes() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	_ = r.SetTrustedProxies(nil)
+	s.consoleConfigErr = s.cfg.ValidateConsole()
+	s.consoleLoginLimiter = newConsoleLoginLimiter(time.Now)
+	s.ollamaStatus = newOllamaStatusCache(time.Now)
 	access := newAccessControl(s.cfg.Server.InternalKey)
-	r.Use(access.middleware())
 	r.Use(RequestIDHeader())
+	legacyAuth := access.middleware()
+	consoleAuth := s.consoleMiddleware()
+	r.Use(func(c *gin.Context) {
+		if isConsolePath(c.Request.URL.Path) {
+			consoleAuth(c)
+		} else {
+			legacyAuth(c)
+		}
+	})
+	s.setupConsoleRoutes(r)
+	registerConsoleStaticRoutes(r, "./static/console", s.cfg.Console.PublicOrigin)
 	r.POST("/auth/browser", access.bootstrap)
 
 	r.GET("/health", s.handleHealth)
@@ -158,6 +190,7 @@ func (s *Server) setupRoutes() {
 		internal.GET("/smarthome/status", s.handleSmartHomeStatus)
 		internal.GET("/smarthome/devices", s.handleSmartHomeDevices)
 		internal.GET("/smarthome/suggestions", s.handleSmartHomeSuggestions)
+		internal.POST("/smarthome/suggestions/:id/bindings", s.handleSmartHomeBindings)
 		internal.POST("/smarthome/suggestions/:id/confirm", s.handleSmartHomeConfirm)
 		internal.POST("/smarthome/suggestions/:id/ignore", s.handleSmartHomeIgnore)
 		internal.POST("/smarthome/analyze", s.handleSmartHomeAnalyze)
@@ -513,13 +546,20 @@ func (s *Server) handleGetSessionMessages(c *gin.Context) {
 		c.JSON(200, gin.H{"messages": []interface{}{}})
 		return
 	}
-	msgs := s.sessionStore.GetMessages(channel, userId)
+	var msgs []core.Message
 	p := requestPrincipal(c.Request)
-	if !p.Admin {
-		var owned bool
-		msgs, owned = s.sessionStore.OwnedMessages(channel, userId, p.Owner)
-		if !owned {
+	if p.Admin {
+		msgs = s.sessionStore.GetMessages(channel, userId)
+	} else {
+		var err error
+		msgs, err = s.sessionStore.OwnedMessages(channel, userId, p.Owner)
+		if errors.Is(err, core.ErrSessionNotFound) {
 			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+		if err != nil {
+			s.logger.Warn("session history unavailable", zap.Error(err))
+			c.JSON(500, gin.H{"error": "session unavailable", "code": "session_unavailable"})
 			return
 		}
 	}

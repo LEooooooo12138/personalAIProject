@@ -93,6 +93,10 @@ type SessionManager struct {
 	mu       sync.RWMutex
 	endCh    chan *Session // 通知外部：有会话结束了
 
+	// Lock order: turnMu -> Session.mu. Never hold either across inference/network.
+	turnMu sync.Mutex
+	turns  map[turnKey]*turnSlot
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -255,6 +259,10 @@ func (m *SessionManager) EndSession(s *Session) {
 	s.State = SessionEnding
 	s.mu.Unlock()
 
+	m.notifySessionEnd(s)
+}
+
+func (m *SessionManager) notifySessionEnd(s *Session) {
 	m.logger.Info("session ending",
 		zap.String("session_id", s.ID),
 		zap.Int("rounds", s.RoundCount),
@@ -322,17 +330,22 @@ func (m *SessionManager) scanExpired() {
 
 	now := time.Now()
 	for _, s := range snapshot {
-		s.mu.RLock()
-		active := s.State == SessionActive
-		idle := now.Sub(s.LastActiveAt)
-		s.mu.RUnlock()
-
-		if active && idle > m.cfg.IdleTimeout {
-			m.logger.Info("session idle timeout",
-				zap.String("session_id", s.ID),
-				zap.Duration("idle", idle),
-			)
-			m.EndSession(s)
+		// Acquiring a turn and expiring an idle session are mutually exclusive.
+		// Waiters also pin the identity until they acquire or cancel.
+		m.turnMu.Lock()
+		if m.turns[turnKey{s.ChannelID, s.UserID}] != nil {
+			m.turnMu.Unlock()
+			continue
+		}
+		s.mu.Lock()
+		expire := s.State == SessionActive && now.Sub(s.LastActiveAt) > m.cfg.IdleTimeout
+		if expire {
+			s.State = SessionEnding
+		}
+		s.mu.Unlock()
+		m.turnMu.Unlock()
+		if expire {
+			m.notifySessionEnd(s)
 		}
 	}
 }

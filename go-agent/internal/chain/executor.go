@@ -51,10 +51,12 @@ func (e *ChainExecutor) Run(ctx context.Context, chainName string, state *ChainS
 		return nil, err
 	}
 
-	e.logger.Info("chain started",
-		zap.String("chain", chain.Name),
-		zap.String("query", vault.Truncate(state.Query, 80)),
-	)
+	fields := []zap.Field{zap.String("chain", chain.Name)}
+	// Personal knowledge inputs stay within the request's management view.
+	if state.Vault == "agent" {
+		fields = append(fields, zap.String("query", vault.Truncate(state.Query, 80)))
+	}
+	e.logger.Info("chain started", fields...)
 
 	result := e.runChain(ctx, chain, state)
 	result.ChainName = chainName

@@ -26,13 +26,13 @@ func TestSmartHomeStopCancelsAndWaitsForCollection(t *testing.T) {
 				t.Fatal(err)
 			}
 			entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			var releaseOnce sync.Once
+			var releaseOnce, enteredOnce, canceledOnce sync.Once
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			defer unblock()
 			m.client.httpClient.Transport = lifecycleTransport(func(r *http.Request) (*http.Response, error) {
-				close(entered)
+				enteredOnce.Do(func() { close(entered) })
 				<-r.Context().Done()
-				close(canceled)
+				canceledOnce.Do(func() { close(canceled) })
 				<-release
 				return nil, r.Context().Err()
 			})
