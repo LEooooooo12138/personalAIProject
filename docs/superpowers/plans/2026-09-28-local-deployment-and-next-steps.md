@@ -21,23 +21,57 @@
 
 ## 1. 本地先完成的工作
 
-### 1.1 核对现有环境（用户操作，约一次信息收集）
+### 1.1 核对现有环境（2026-09-28 已通过终端补查）
 
-请提供以下非秘密信息：
+以下结果来自本机 CIM、nvidia-smi、Ollama CLI 和监听端口检查；仅记录本次检查时状态。
+
+| 项目 | 实测结果 |
+|---|---|
+| CPU | Intel Core Ultra 7 265K，20 核 / 20 线程 |
+| 系统内存 | Windows 可见物理内存 47.3 GiB；不是当前剩余空闲内存 |
+| GPU | NVIDIA GeForce RTX 5080，显存 16,303 MiB（约 16 GiB） |
+| GPU 驱动 | 610.47；检查时显存占用 1,132 MiB |
+| Ollama | 0.34.4，监听 `127.0.0.1:11434`；`ollama ps` 当时没有已加载模型 |
+| Ollama 程序 | `C:\Users\Admin\AppData\Local\Programs\Ollama\ollama.exe`；当前工具终端 PATH 未包含它 |
+| gemma4:12b | 7.6 GB，11.9B，Q4_K_M；本机 `ollama show` 明确列出 tools、vision、audio、thinking、completion |
+| llava:7b | 4.7 GB，Q4_0；能力为 completion、vision，未列出 tools |
+| bge-m3:latest | 1.2 GB，F16；能力为 embedding |
+| HA | 用户确认已安装；检查时本机 8123 未监听、HTTP 连接拒绝，尚不能查询其版本/实体 |
+| Docker / WSL | Docker Desktop Linux Engine 管道不存在；Ubuntu 与 docker-desktop 均 Stopped。不能据此认定 HA 未安装 |
+
+**据此调整：** 不再要求用户抄硬件和模型清单，不重新安装 HA，不先下载新模型。优先评测已有 gemma4:12b 的受约束意图输出；从小实体集合和约 8K 上下文起步，实际 GPU 占用、延迟与工具准确率仍需运行测试。模型文件大小不等于运行显存占用，262K 标称上下文不作为当前机器的默认设置。bge-m3 继续用于检索；llava 暂保留，后续实测再决定是否合并视觉模型。
+
+**2026-09-29 复查：** 用户已启动 Docker，现已只读确认现有 HA，无需重新安装。
+
+| 项目 | 本次证据 |
+|---|---|
+| HA 安装方式 | Docker Container，容器名 `ha`，镜像 `homeassistant/home-assistant:latest` |
+| 实际版本 | 容器使用的镜像标签元数据与 `/config/.HA_VERSION` 均为 `2026.7.2`，amd64 |
+| 持久化配置 | Docker 命名卷 `ha_config` 挂载 `/config` |
+| 端口映射 | 宿主机 `8123` → 容器 `8123/tcp`，启动后预期本机地址 `http://localhost:8123` |
+| 容器状态 | `exited`，上次结束时间 2026-07-18；退出码 137，但 `OOMKilled=false`，不据此推断内存不足 |
+| 重启策略 | `no`，启动 Docker 不会自动拉起此容器 |
+| 配置条目 | sun、go2rtc、analytics、backup、shopping_list、google_translate、radio_browser；未发现 Ollama、Tuya、Tuya Local 或 LocalTuya 配置条目 |
+| 实体登记 | 21 个；平台为 sun、backup、person、shopping_list、google_translate；Tuya 平台实体 0 个 |
+
+本次通过 Docker 将配置流入内存解析，只输出版本、集成域和数量，没有写出秘密文件、读取认证库、启动容器或调用设备服务。配置登记结果不等于实时实体状态。
+
+**当前下一步：** 启动已有容器 `docker start ha`，等待 HA 就绪并验证网页；然后备份现有配置，接入一台 Tuya 设备。不重建容器、不删除 `ha_config` 卷。需要自动启动时再按部署需求设置重启策略，本轮没有修改。
+
+仍需要补充的非秘密信息：
 
 | 信息 | 用途 |
 |---|---|
-| HA 是否已经可登录、版本、安装方式（虚拟机/容器/其他）、局域网地址 | 决定网络与安装步骤；已有实例优先复用 |
 | 一台灯或插座的品牌、完整型号、Smart Life 中显示的连接类型 | 判断 Tuya 本地集成兼容性 |
-| Windows GPU 型号、显存、内存；`ollama list` 中的模型名 | 选择本地可用模型，不先下载更大模型 |
 | 企业微信是员工自建应用、客户联系还是微信客服 | 后续核定发送 API；不影响 HA 第一阶段 |
 
 可以运行以下只读命令；输出不需要包含账号、token 或 local_key：
 
 ```powershell
 go version
-ollama --version
-ollama list
+$taskOllama = 'C:\Users\Admin\AppData\Local\Programs\Ollama\ollama.exe'
+& $taskOllama --version
+& $taskOllama list
 Invoke-RestMethod http://localhost:11434/api/tags | Select-Object -ExpandProperty models | Select-Object name
 ```
 

@@ -13,6 +13,10 @@
 
 ## What is Go Agent?
 
+> **2026-10-09 当前状态：** 家庭 Console 使用 React/TypeScript，由 Go 同源提供 `/app/`。已实现独立账号、本人聊天、全屋区域设备浏览、公共/私人知识、自动化建议确认及 HA OAuth 续期。前端对话即时控制 HA 尚待开发，微信等外部入口暂缓。下文部分挂件/多通道说明属于早期架构概览。
+>
+> 当前权威入口：[完整 spec 对比](docs/spec-implementation-audit-2026-10-09.md) · [HA 对话控制设计](docs/superpowers/specs/2026-10-09-console-ha-control-design.md) · [开发计划](docs/superpowers/plans/2026-10-09-console-ha-control-roadmap.md) · [家庭 Console 本机配置](go-agent/docs/console-local-setup.md) · [GitHub 归档记录](docs/github-publication-2026-10-09.md)。
+
 Go Agent is a personal AI agent that runs entirely on your machine. It connects to [Ollama](https://ollama.com) for local LLM inference and layers on top:
 
 - **Memory sedimentation** — conversations are automatically distilled into structured knowledge over time

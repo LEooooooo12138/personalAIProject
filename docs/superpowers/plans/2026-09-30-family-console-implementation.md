@@ -10,8 +10,11 @@
 
 **Spec:** [家庭控制台设计](../specs/2026-09-30-family-console-design.md)；[本地部署与未来云扩展](../specs/2026-09-30-family-console-cloud-deployment.md)。
 
-**Status:** 设计基本方案已认可；本计划待审阅和执行方式确认。尚未编写前端或账号产品代码。
+**Status:** 用户已批准先实施 Task 0、1、2，并要求每项完成后按八荣八耻检查；本轮使用子代理分任务实施与独立审查。后续范围以以下执行记录为准。
 
+执行记录（2026-10-03）：Task 0、1、2 均已完成，逐项及最终组合审查通过；组合审查发现的生成超时终结帧和 JSON 语法状态码问题已修复并复审关闭。逐项八荣八耻与测试证据见 [实施记录](../../family-console-task012-results-2026-09-30.md)。Task 3–8 继续待实施。
+
+执行记录（2026-10-08）：根据用户追加的 HTML + React + Vite 前端授权，在 Task 0–2 实际接口之上完成本轮 [前端执行计划](2026-10-08-family-console-frontend.md)。原 Task 5 的基础页面与 Task 6 的本人聊天主体、Go 静态服务和相应 CI/浏览器验收已实现；同源 Vite 开发代理及完整家庭业务验收仍未完成，因此未将原 Task 5/6/8 全项勾选。原 Task 3、4、7 仍待实施。功能、测试与逐步八荣八耻检查见 [前端交付记录](../../family-console-frontend-results-2026-10-08.md)。
 ## Global Constraints
 
 - 首版前端、Go 服务、账号、Vault、会话、HA 采集及归档均在家庭主机运行和持久化，沿用现有本地 Ollama，不引入云模型依赖。
@@ -60,12 +63,12 @@
 - `RevokeAllSessions() error` 原子撤销全部登录并取消已注册请求，供 Task 8 的离线恢复工具使用，不新增浏览器端点。
 - 包级错误 `ErrUninitialized`、`ErrUnauthenticated`、`ErrForbidden`、`ErrConflict`、`ErrInvalid`、`ErrUnavailable`、`ErrBusy` 使用 errors.Is 判断，分别映射 503/401/403/409/422/503/429；HTTP 语法错误独立为 400。
 
-- [ ] 写失败测试：`TestBootstrapRejectsCorruptState`、`TestConcurrentBootstrapCreatesOneAdmin`、`TestLoginSurvivesRestart`、`TestPasswordChangeRevokesAllSessions`、`TestSharingRevisionConflict`。断言第二次 bootstrap 冲突、磁盘无明文密码/原始 token、改密后所有旧 token 被拒绝、旧 revision 不覆盖新策略。
-- [ ] 运行 `go test ./internal/console -count=1`，记录缺失实现造成的预期失败。
-- [ ] 实现上述接口，所有状态写入通过串行事务和同目录临时文件原子替换，持久化成功后发布内存状态。写失败不返回成功；随机性失败拒绝操作。
-- [ ] 哈希参数解析接受固定已支持格式并限制资源，错误账号使用同成本验证；最多 2 个并发哈希，超额返回可映射的 busy 错误。限流归 Task 1。
-- [ ] 实现 7 天过期、临时密码改密标记、禁用/改密/重置撤销、重新启用不复活旧会话；禁止通过成员 API 修改 admin。实现 typed errors 供网关映射。
-- [ ] 复跑包测试，并用真实临时目录重启 Store 验证，不以纯内存 mock 代替持久化测试。独立审查通过后记录证据和任务提交边界。
+- [x] 写失败测试：`TestBootstrapRejectsCorruptState`、`TestConcurrentBootstrapCreatesOneAdmin`、`TestLoginSurvivesRestart`、`TestPasswordChangeRevokesAllSessions`、`TestSharingRevisionConflict`。断言第二次 bootstrap 冲突、磁盘无明文密码/原始 token、改密后所有旧 token 被拒绝、旧 revision 不覆盖新策略。
+- [x] 运行 `go test ./internal/console -count=1`，记录缺失实现造成的预期失败。
+- [x] 实现上述接口，所有状态写入通过串行事务和同目录临时文件原子替换，持久化成功后发布内存状态。写失败不返回成功；随机性失败拒绝操作。
+- [x] 哈希参数解析接受固定已支持格式并限制资源，错误账号使用同成本验证；最多 2 个并发哈希，超额返回可映射的 busy 错误。限流归 Task 1。
+- [x] 实现 7 天过期、临时密码改密标记、禁用/改密/重置撤销、重新启用不复活旧会话；禁止通过成员 API 修改 admin。实现 typed errors 供网关映射。
+- [x] 复跑包测试，并用真实临时目录重启 Store 验证，不以纯内存 mock 代替持久化测试。独立审查通过后记录证据和任务提交边界。
 
 关键断言示例（省略临时目录与错误检查准备，实际测试必须检查）：
 
@@ -84,14 +87,14 @@ if _, err := store.Resolve(login.Token); !errors.Is(err, ErrUnauthenticated) { t
 
 `auth/status` 返回 `{initialized}`；login/me 返回 `{user:{id,username,display_name,role,must_change_password},capabilities:[],csrf_token}`；写请求头为 `X-CSRF-Token`。password 输入 `{old_password,new_password}`；logout/password 成功 204。成员列表 `{members:[]}`，创建和重置只在成功响应附 `temporary_password`；创建请求仅 `{username,display_name}`，修改仅 `{display_name,disabled}`。bootstrap 输入 `{username,display_name,password}`，reset-admin 输入 `{password}`，这两者始终位于旧管理 Bearer 域。
 
-- [ ] 写失败测试 `TestConsoleAuthHTTP`：表驱动覆盖主设计第 7 节 auth/members 路由；匿名 401、成员 admin 操作 403、受限改密账号可读 me 和改密但业务 API 拒绝。
-- [ ] 写 `TestConsoleOriginAndCSRF`：错误 scheme/host/port、缺少写请求 Origin 或 CSRF 拒绝；HTTPS origin 即使 Go 收到反代 HTTP 也发 Secure cookie；cookie 无 Domain，伪造 X-Forwarded-Proto 不改变行为。
-- [ ] 写 `TestConsoleBootstrapRequiresManagementKey`：空/空白/占位密钥启用时失败、旧 Bearer 才可初始化/恢复、并发只创建一次、损坏存储不能走初始化。
-- [ ] 运行 `go test ./internal/gateway ./internal/core -run Console -count=1` 记录失败。
-- [ ] 按设计实现 auth、me、password、logout、成员管理及旧 `/internal/console/bootstrap`、`/reset-admin`。登录 JSON 返回公开身份和 CSRF，令牌仅 Set-Cookie；错误统一 snake_case DTO，不返回原始内部错误。
-- [ ] 中间件显式分流 console 路径，关闭时返回未启用；legacy cookie/Bearer 契约回归保持。成员临时密码仅当次返回；账号字段校验与 Store 一致。
-- [ ] 登录按来源 IP 和规范用户名组合限制为 5 分钟内最多 10 次尝试，来源 IP 总计 5 分钟最多 60 次；桶数有界且过期回收，不信任未配置代理的任意转发 IP，超额 429。验证未知账号同样受限。
-- [ ] 配置监听地址，默认兼容原服务，控制台本地启动文档使用回环地址；局域网直接访问需显式配置。复跑 gateway/core 包及旧身份测试，独立审查。
+- [x] 写失败测试 `TestConsoleAuthHTTP`：表驱动覆盖主设计第 7 节 auth/members 路由；匿名 401、成员 admin 操作 403、受限改密账号可读 me 和改密但业务 API 拒绝。
+- [x] 写 `TestConsoleOriginAndCSRF`：错误 scheme/host/port、缺少写请求 Origin 或 CSRF 拒绝；HTTPS origin 即使 Go 收到反代 HTTP 也发 Secure cookie；cookie 无 Domain，伪造 X-Forwarded-Proto 不改变行为。
+- [x] 写 `TestConsoleBootstrapRequiresManagementKey`：空/空白/占位密钥启用时失败、旧 Bearer 才可初始化/恢复、并发只创建一次、损坏存储不能走初始化。
+- [x] 运行 `go test ./internal/gateway ./internal/core -run Console -count=1` 记录失败。
+- [x] 按设计实现 auth、me、password、logout、成员管理及旧 `/internal/console/bootstrap`、`/reset-admin`。登录 JSON 返回公开身份和 CSRF，令牌仅 Set-Cookie；错误统一 snake_case DTO，不返回原始内部错误。
+- [x] 中间件显式分流 console 路径，关闭时返回未启用；legacy cookie/Bearer 契约回归保持。成员临时密码仅当次返回；账号字段校验与 Store 一致。
+- [x] 登录按来源 IP 和规范用户名组合限制为 5 分钟内最多 10 次尝试，来源 IP 总计 5 分钟最多 60 次；桶数有界且过期回收，不信任未配置代理的任意转发 IP，超额 429。验证未知账号同样受限。
+- [x] 配置监听地址，默认兼容原服务，控制台本地启动文档使用回环地址；局域网直接访问需显式配置。复跑 gateway/core 包及旧身份测试，独立审查。
 
 ## Task 2: 家庭会话隔离、撤销与可靠保存
 
@@ -101,13 +104,15 @@ if _, err := store.Resolve(login.Token); !errors.Is(err, ErrUnauthenticated) { t
 
 列表返回 `{sessions:[{id,started_at,last_active_at,round_count,message_count,preview}]}`，详情返回 `{id,messages:[{role,content,timestamp}]}`。这里的 id 是 WS 使用的 SID，不是带 channel 前缀的内部存储键；只在服务端转换，测试覆盖二者不同。WS 沿用 `session/response/error` 协议，HTTP 统一错误 DTO 不改变 WS 既有帧格式。
 
-- [ ] 写 `TestConsoleCrossDeviceOwnerIsolation`：A 两个登录可读同一 SID，B 和 admin 猜该 SID 均 404；读不存在 SID 同样 404，IO 故障 500。
-- [ ] 写 `TestConsoleRevokesIdleAndBusySockets`：退出、禁用、改密和过期分别关闭空闲/生成中连接；握手与撤销并发不能漏登记，最终输出不得跨撤销边界。
-- [ ] 写 `TestConsoleExcludedFromGlobalIndexAndSedimentation`：通过真实结束消费者结束 console 会话，断言没有全局索引记录或 personal/_memory 文件，并最终 CompleteSession/释放资源。
-- [ ] 写 `TestSessionAtomicSave`：先保存有效历史，再注入写入/替换失败，旧文件仍可冷读；关键目录不可写初始化失败而不是仅 warning。保留旧会话格式兼容。
-- [ ] 运行针对测试记录失败；最小重构 WS 复用既有轮次、锁、过滤与持久化，不复制聊天引擎。会话关闭与登录退出分开，退出不删除历史。
-- [ ] 在 session index 的写入和启动重建都排除 console；统一结束消费者跳过 console 沉淀仍完成状态迁移。会话文件原子写，初始化失败按核心持久存储错误处理；不将单个历史损坏伪装成不存在。
-- [ ] 回归已有 `shared_turn`、`session_recovery`、FIFO、轮次/取消测试并运行 core/gateway 全包。独立审查。
+实施接缝核对补充：Store 增加传输无关的 `WithSession(ctx context.Context,token string,fn func(context.Context) error) error`，将最终保存与服务端发布相对于撤销串行化，避免“校验通过后、实际发送前被撤销”的间隙。回调受剩余登录时长和请求取消约束，socket 写入有短期限；不在账号锁中执行模型推理。验收的是服务端发布顺序，不承诺控制网络中已有字节的到达顺序。
+
+- [x] 写 `TestConsoleCrossDeviceOwnerIsolation`：A 两个登录可读同一 SID，B 和 admin 猜该 SID 均 404；读不存在 SID 同样 404，IO 故障 500。
+- [x] 写 `TestConsoleRevokesIdleAndBusySockets`：退出、禁用、改密和过期分别关闭空闲/生成中连接；握手与撤销并发不能漏登记，最终输出不得跨撤销边界。
+- [x] 写 `TestConsoleExcludedFromGlobalIndexAndSedimentation`：通过真实结束消费者结束 console 会话，断言没有全局索引记录或 personal/_memory 文件，并最终 CompleteSession/释放资源。
+- [x] 写 `TestSessionAtomicSave`：先保存有效历史，再注入写入/替换失败，旧文件仍可冷读；关键目录不可写初始化失败而不是仅 warning。保留旧会话格式兼容。
+- [x] 运行针对测试记录失败；最小重构 WS 复用既有轮次、锁、过滤与持久化，不复制聊天引擎。会话关闭与登录退出分开，退出不删除历史。
+- [x] 在 session index 的写入和启动重建都排除 console；统一结束消费者跳过 console 沉淀仍完成状态迁移。会话文件原子写，初始化失败按核心持久存储错误处理；不将单个历史损坏伪装成不存在。
+- [x] 回归已有 `shared_turn`、`session_recovery`、FIFO、轮次/取消测试并运行 core/gateway 全包。独立审查。
 
 ## Task 3: 共享知识与 HA 运行资料的统一边界
 
@@ -210,3 +215,6 @@ devices 返回 `{devices:[],count,snapshot_at,poll_interval_seconds,freshness}`�
 Store 不依赖 core/gateway；所有新身份和角色只来自鉴权上下文。共享策略由 Store 持久化、服务端业务适配验证与投影，前端不复制授权判断作为安全边界。Task 5/6/7 以实际后端 DTO 为准，遇到契约差异先更新双方测试与设计，不在前端猜接口。
 
 建议使用子代理分任务实施并独立审查；同文件修改由主代理串行整合。每项任务完成后检查失败到通过的证据，最后做整体验收。实施开始前需要用户审阅这份计划并选定执行方式；不要求再次确认已认可的技术栈、独立账号或本地部署方向。
+
+
+> 2026-10-09 反查更新：公共知识、管理员私人知识、建议审核/共享与采集页面的旧承诺已纳入本轮补全；“本阶段暂缓”不代表永久移除。当前范围、设备全家只读覆盖规则与HA授权续期以 `docs/superpowers/specs/2026-10-09-family-console-completion-design.md` 和对应实施计划为准，实际完成证据等待本轮验收报告。
