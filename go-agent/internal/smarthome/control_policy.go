@@ -38,7 +38,10 @@ func normalizeControlConfig(c ControlConfig) (ControlConfig, string, error) {
 	seen := map[string]bool{}
 	for i, v := range c.Targets {
 		domain := strings.SplitN(v.EntityID, ".", 2)[0]
-		if !controlEntityPattern.MatchString(v.EntityID) || seen[v.EntityID] || (domain != "light" && domain != "switch" && domain != "fan") || !v.LoadLocationVerified || !validControlName(v.Name) || !validControlName(v.AreaName) || len(v.AllowedActions) == 0 || len(v.AllowedActions) > 2 || (v.Domain != "" && v.Domain != domain) {
+		if v.SwitchTestAuthorized && domain != "switch" {
+			return c, "", ErrControlInvalid
+		}
+		if !controlEntityPattern.MatchString(v.EntityID) || seen[v.EntityID] || (domain != "light" && domain != "switch" && domain != "fan") || (!v.LoadLocationVerified && !v.SwitchTestAuthorized) || !validControlName(v.Name) || !validControlName(v.AreaName) || len(v.AllowedActions) == 0 || len(v.AllowedActions) > 2 || (v.Domain != "" && v.Domain != domain) {
 			return c, "", ErrControlInvalid
 		}
 		seen[v.EntityID] = true

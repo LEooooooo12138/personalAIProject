@@ -14,6 +14,7 @@ type HAControlTarget struct {
 	Aliases              []string `mapstructure:"aliases"`
 	AllowedActions       []string `mapstructure:"allowed_actions"`
 	LoadLocationVerified bool     `mapstructure:"load_location_verified"`
+	SwitchTestAuthorized bool     `mapstructure:"switch_test_authorized" json:"switch_test_authorized" yaml:"switch_test_authorized"`
 }
 type HAControlConfig struct {
 	Enabled          bool              `mapstructure:"enabled"`
@@ -28,7 +29,7 @@ type HAControlConfig struct {
 func (c HAControlConfig) ServiceConfig() smarthome.ControlConfig {
 	targets := make([]smarthome.ControlTarget, 0, len(c.Targets))
 	for _, t := range c.Targets {
-		targets = append(targets, smarthome.ControlTarget{EntityID: t.EntityID, Name: t.Name, AreaName: t.AreaName, Domain: t.Domain, Aliases: t.Aliases, AllowedActions: t.AllowedActions, LoadLocationVerified: t.LoadLocationVerified})
+		targets = append(targets, smarthome.ControlTarget{EntityID: t.EntityID, Name: t.Name, AreaName: t.AreaName, Domain: t.Domain, Aliases: t.Aliases, AllowedActions: t.AllowedActions, LoadLocationVerified: t.LoadLocationVerified, SwitchTestAuthorized: t.SwitchTestAuthorized})
 	}
 	return smarthome.ControlConfig{Targets: targets, ProposalTTL: c.ProposalTTL, ReadbackTimeout: c.ReadbackTimeout, ReadbackInterval: c.ReadbackInterval, Retention: c.Retention, MaxRecords: c.MaxRecords}
 }

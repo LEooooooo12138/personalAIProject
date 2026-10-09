@@ -27,6 +27,8 @@ type ControlTarget struct {
 	Aliases              []string `json:"aliases,omitempty" yaml:"aliases"`
 	AllowedActions       []string `json:"allowed_actions" yaml:"allowed_actions"`
 	LoadLocationVerified bool     `json:"load_location_verified" yaml:"load_location_verified"`
+	// SwitchTestAuthorized permits this exact switch channel test without claiming its load location is verified.
+	SwitchTestAuthorized bool `mapstructure:"switch_test_authorized" json:"switch_test_authorized" yaml:"switch_test_authorized"`
 }
 type ControlPolicy struct {
 	Revision string
