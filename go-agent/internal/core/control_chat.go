@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/smarthome"
+	"strings"
 )
 
 type HAIntentParser interface {
@@ -48,6 +50,20 @@ func (c *ControlChat) Handle(ctx context.Context, actor smarthome.ControlActor, 
 		}
 	}
 	intent, err := c.parser.Parse(ctx, query, candidates)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if errors.Is(err, chain.ErrHAIntentInvalid) {
+		content := "暂时无法确定设备请求。请使用完整设备名称或已配置别名，说明要查询状态、打开还是关闭。尚未发送设备控制指令。"
+		if len(cs) > 0 {
+			names := make([]string, 0, min(len(cs), 3))
+			for _, target := range cs[:min(len(cs), 3)] {
+				names = append(names, target.Name)
+			}
+			content += "可用设备名称：" + strings.Join(names, "、") + "。"
+		}
+		return &ControlChatResult{Type: "response", Content: content}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
