@@ -1,4 +1,9 @@
 # Go build artifacts
+go-agent/web/node_modules/
+go-agent/web/coverage/
+go-agent/web/test-results/
+go-agent/web/playwright-report/
+go-agent/static/console/
 go-agent/agentd.exe
 go-agent/agentd.exe~
 go-agent/.gocache/
@@ -21,3 +26,11 @@ wiki-pages/
 
 # Config with secrets
 go-agent/config/agent.yaml
+
+# Local runtime, review evidence, credentials and one-off HA recovery scripts
+/.local/
+/.superpowers/
+/.env
+/.env.*
+!/.env.example
+/go-agent/tools/ha_*.py
