@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,11 +16,14 @@ import (
 const fixtureHAToken = "fixture-ha-secret"
 
 // Only these two disposable loopback servers are reachable by the fixture.
-// The HA mock accepts only directory/state reads and explicit automation installs.
-// No requests leave these loopback test servers; device actions stay rejected.
+// The HA mock accepts directory/state reads, explicit automation installs, and
+// on/off for one configured synthetic switch.
+// No requests leave loopback; only the approved synthetic switch accepts on/off.
 // The Ollama mock lists names only; chat and embedding remain canned/offline.
 type fixtureDependencies struct {
 	automationWrites atomic.Int32
+	deviceWrites     atomic.Int32
+	stateMu          sync.Mutex
 	ha               *httptest.Server
 	tags             *httptest.Server
 }
@@ -62,6 +66,34 @@ func newFixtureDependencies() *fixtureDependencies {
 	deps := &fixtureDependencies{}
 	deps.ha = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.Header.Get("Authorization") == "Bearer "+fixtureHAToken {
+			if r.URL.Path == "/api/services/switch/turn_on" || r.URL.Path == "/api/services/switch/turn_off" {
+				var payload struct {
+					EntityID string `json:"entity_id"`
+				}
+				decoder := json.NewDecoder(r.Body)
+				decoder.DisallowUnknownFields()
+				if decoder.Decode(&payload) != nil || payload.EntityID != "switch.channel_1" {
+					http.Error(w, "unsupported fixture target", 422)
+					return
+				}
+				deps.stateMu.Lock()
+				for i := range states {
+					if states[i].EntityID == payload.EntityID {
+						if strings.HasSuffix(r.URL.Path, "turn_on") {
+							states[i].State = "on"
+						} else {
+							states[i].State = "off"
+						}
+						states[i].LastChanged = time.Now().UTC()
+						states[i].LastUpdated = states[i].LastChanged
+					}
+				}
+				deps.deviceWrites.Add(1)
+				deps.stateMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[]`))
+				return
+			}
 			if strings.HasPrefix(r.URL.Path, "/api/config/automation/config/") {
 				var config smarthome.AutomationConfig
 				if json.NewDecoder(r.Body).Decode(&config) != nil {
@@ -147,10 +179,23 @@ func newFixtureDependencies() *fixtureDependencies {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/states":
+			deps.stateMu.Lock()
 			_ = json.NewEncoder(w).Encode(states)
+			deps.stateMu.Unlock()
 		case "/api/config":
 			_ = json.NewEncoder(w).Encode(map[string]string{"time_zone": "Asia/Shanghai"})
 		default:
+			if strings.HasPrefix(r.URL.Path, "/api/states/") {
+				id := strings.TrimPrefix(r.URL.Path, "/api/states/")
+				deps.stateMu.Lock()
+				defer deps.stateMu.Unlock()
+				for _, state := range states {
+					if state.EntityID == id {
+						json.NewEncoder(w).Encode(state)
+						return
+					}
+				}
+			}
 			http.NotFound(w, r)
 		}
 	}))

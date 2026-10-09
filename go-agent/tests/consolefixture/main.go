@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,8 +34,53 @@ var errFixtureOffline = errors.New("offline fixture has no model")
 
 type offlineInference struct{ tagsClient inference.Client }
 
-func (offlineInference) Chat(context.Context, json.RawMessage) (json.RawMessage, error) {
-	return nil, errFixtureOffline
+func (offlineInference) Chat(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	var req struct {
+		Messages       []struct{ Role, Content string }
+		ResponseFormat struct {
+			Type       string
+			JSONSchema struct{ Name string } `json:"json_schema"`
+		} `json:"response_format"`
+	}
+	if json.Unmarshal(raw, &req) != nil || req.ResponseFormat.Type != "json_schema" || req.ResponseFormat.JSONSchema.Name != chain.HAIntentSchemaVersion {
+		return nil, errFixtureOffline
+	}
+	var data struct {
+		Query      string
+		Candidates chain.HACandidates
+	}
+	for _, msg := range req.Messages {
+		if msg.Role == "user" {
+			if json.Unmarshal([]byte(msg.Content), &data) != nil {
+				return nil, errFixtureOffline
+			}
+		}
+	}
+	intent := chain.HAIntent{Kind: "chat"}
+	query := data.Query
+	if strings.Contains(query, "独立温度计") || strings.Contains(query, "sensor.temperature") {
+		intent.Kind = "query"
+		intent.EntityID = "sensor.temperature"
+	} else if strings.Contains(query, "开关 1") || strings.Contains(query, "客厅灯") || strings.Contains(query, "switch.channel_1") {
+		intent.Kind = "clarify"
+		intent.Question = "请明确单个设备的查询或开关动作。"
+		switch {
+		case strings.HasPrefix(query, "打开") || strings.HasPrefix(query, "开启"):
+			intent = chain.HAIntent{Kind: "on_off", EntityID: "switch.channel_1", Action: "turn_on"}
+		case strings.HasPrefix(query, "关闭") || strings.HasPrefix(query, "关掉"):
+			intent = chain.HAIntent{Kind: "on_off", EntityID: "switch.channel_1", Action: "turn_off"}
+		case strings.Contains(query, "状态") || strings.Contains(query, "开了吗") || strings.Contains(query, "现在"):
+			intent = chain.HAIntent{Kind: "query", EntityID: "switch.channel_1"}
+		}
+	}
+	content, e := json.Marshal(intent)
+	if e != nil {
+		return nil, e
+	}
+	return json.Marshal(map[string]any{"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": string(content)}, "finish_reason": "stop"}}})
 }
 func (offlineInference) Embed(context.Context, json.RawMessage) (json.RawMessage, error) {
 	return nil, errFixtureOffline
@@ -105,7 +151,7 @@ func newFixture(listen, origin string) (_ *fixture, err error) {
 			dependencies.Close()
 		}
 	}()
-	config := fmt.Sprintf("server:\n  listen_address: %q\n  internal_key: %q\ninference:\n  endpoint: %q\n  models:\n    local: gemma4:12b\n    embedding: bge-m3:latest\nvaults:\n  personal: %q\n  agent: %q\nsmarthome:\n  enabled: true\n  base_url: %q\n  token: %q\nconsole:\n  enabled: true\n  data_dir: %q\n  public_origin: %q\n  allow_insecure_http: true\n", listen, hex.EncodeToString(keyBytes), dependencies.tags.URL, filepath.Join(dir, "personal"), filepath.Join(dir, "agent"), dependencies.ha.URL, fixtureHAToken, filepath.Join(dir, "accounts"), origin)
+	config := fmt.Sprintf("server:\n  listen_address: %q\n  internal_key: %q\ninference:\n  endpoint: %q\n  models:\n    local: gemma4:12b\n    embedding: bge-m3:latest\nvaults:\n  personal: %q\n  agent: %q\nsmarthome:\n  enabled: true\n  base_url: %q\n  token: %q\n  control:\n    enabled: true\n    targets:\n      - entity_id: switch.channel_1\n        name: 开关 1\n        area_name: 客厅\n        aliases: [客厅灯]\n        allowed_actions: [turn_on, turn_off]\n        load_location_verified: true\nconsole:\n  enabled: true\n  data_dir: %q\n  public_origin: %q\n  allow_insecure_http: true\n", listen, hex.EncodeToString(keyBytes), dependencies.tags.URL, filepath.Join(dir, "personal"), filepath.Join(dir, "agent"), dependencies.ha.URL, fixtureHAToken, filepath.Join(dir, "accounts"), origin)
 	configPath := filepath.Join(dir, "fixture.yaml")
 	if err = os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		return nil, err
@@ -139,6 +185,7 @@ func newFixture(listen, origin string) (_ *fixture, err error) {
 	// Bootstrap constructs Ollama-backed objects but does not contact them.
 	// Replace every server-reachable inference path before creating the gateway.
 	app.Infer = offlineInference{tagsClient: inference.NewOllamaClient(dependencies.tags.URL, 5*time.Second)}
+	app.ControlChat = core.NewControlChat(app.Control, chain.NewHAIntentParser(app.Infer, app.Config.Inference.Models.Local))
 	app.SessionStore = core.NewSessionStore(app.SessionMgr, filepath.Join(dir, "agent", "_sessions"), offlineSessionEmbedder{}, app.Logger)
 	if err = app.SessionStore.Initialize(context.Background()); err != nil {
 		return nil, err

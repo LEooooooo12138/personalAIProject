@@ -58,7 +58,10 @@ test('family areas navigate through real registry grouping and preserve covered 
   await page.getByRole('link', { name: '全部区域', exact: true }).click()
   await page.getByRole('link', { name: /厨房.*2 个设备注册项.*2 个实体/ }).click()
   await page.getByRole('link', { name: /客厅三路开关/ }).click()
-  await expect(page.getByText('实体覆盖到此区域', { exact: true })).toBeVisible()
+  // The kitchen list has multiple entity-override tags until navigation settles.
+  // Wait for this device's detail view before checking its own membership tag.
+  await expect(page.getByRole('heading', { name: '客厅三路开关', exact: true, level: 1 })).toBeVisible()
+  await expect(page.locator('.device-context').getByText('实体覆盖到此区域', { exact: true })).toBeVisible()
   await revealEntityId(page, 'switch.channel_2')
   await expect(page.getByText('switch.channel_1', { exact: true })).toHaveCount(0)
   const privateDTO = await page.request.get('/api/console/v1/areas/a_a2l0Y2hlbg/devices/d_bGl2aW5nLWNvbnRyb2w')
