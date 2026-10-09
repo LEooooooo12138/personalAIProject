@@ -42,25 +42,26 @@ afterEach(() => vi.unstubAllGlobals())
 // These assertions fail if the public/personal boundary or explicit-action workflow is lost.
 describe('knowledge workflows', () => {
   it('searches public agent pages and renders safe body instead of HTML or remote images', async () => {
-    const fetcher = show('/app/knowledge', 'member', (path) => path === '/knowledge/search?q=%E6%B8%A9%E5%BA%A6' ? Response.json({ results: [{ path: 'comfort.md', title: '舒适温度', snippet: '白天建议' }], count: 1 }) : path === '/knowledge/page?path=comfort.md' ? Response.json({ path: 'comfort.md', title: '舒适温度', body: '唯一公开事实\n\n<script>danger()</script> ![remote](https://example.org/pixel)' }) : undefined)
-    fireEvent.change(await screen.findByLabelText('搜索公开知识'), { target: { value: '温度' } })
-    fireEvent.click(screen.getByRole('button', { name: '搜索知识' }))
-    fireEvent.click(await screen.findByRole('link', { name: /舒适温度/ }))
-    expect(await screen.findByText('唯一公开事实')).toBeInTheDocument()
+    const fetcher = await act(async () => show('/app/knowledge', 'member', (path) => path === '/knowledge/search?q=%E6%B8%A9%E5%BA%A6' ? Response.json({ results: [{ path: 'comfort.md', title: '舒适温度', snippet: '白天建议' }], count: 1 }) : path === '/knowledge/page?path=comfort.md' ? Response.json({ path: 'comfort.md', title: '舒适温度', body: '唯一公开事实\n\n<script>danger()</script> ![remote](https://example.org/pixel)' }) : undefined))
+    const input = screen.getByLabelText('搜索公开知识')
+    // Settle auth and the initial URL-to-draft effect before typing, then let
+    // the controlled input commit before submitting its current value.
+    await act(async () => fireEvent.change(input, { target: { value: '温度' } }))
+    expect(input).toHaveValue('温度')
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '搜索知识' })))
+    await act(async () => fireEvent.click(screen.getByRole('link', { name: /舒适温度/ })))
+    expect(screen.getByText('唯一公开事实')).toBeInTheDocument()
     expect(document.querySelector('script')).toBeNull()
     expect(document.querySelector('img')).toBeNull()
     expect(fetcher.mock.calls.some(([url]) => url.includes('/admin/'))).toBe(false)
   })
   it('separates no results from a failed search and never renders raw errors', async () => {
     let fail = false
-    show('/app/knowledge', 'member', (path) => path.startsWith('/knowledge/search') ? fail ? failure('unavailable', 503) : Response.json({ results: [], count: 0 }) : undefined)
-    const input = await screen.findByLabelText('搜索公开知识')
-    // The transport settles immediately, so await React's async query update
-    // explicitly rather than racing a wall-clock findBy timeout under load.
-    await act(async () => {
-      fireEvent.change(input, { target: { value: '不存在' } })
-      fireEvent.click(screen.getByRole('button', { name: '搜索知识' }))
-    })
+    await act(async () => show('/app/knowledge', 'member', (path) => path.startsWith('/knowledge/search') ? fail ? failure('unavailable', 503) : Response.json({ results: [], count: 0 }) : undefined))
+    const input = screen.getByLabelText('搜索公开知识')
+    await act(async () => fireEvent.change(input, { target: { value: '不存在' } }))
+    expect(input).toHaveValue('不存在')
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '搜索知识' })))
     expect(screen.getByText('没有找到可读取的公开资料。')).toBeInTheDocument()
     fail = true
     await act(async () => fireEvent.click(screen.getByRole('button', { name: '搜索知识' })))
