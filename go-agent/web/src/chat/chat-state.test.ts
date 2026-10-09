@@ -84,3 +84,15 @@ describe('chat state ownership', () => {
     expect(state.messages.map((message) => message.content)).toEqual(['首次可能未保存'])
   })
 })
+
+it('keeps authoritative control references scoped to the current identity and session', () => {
+  let state = transition(initialChatState(1), { type: 'select', sid: 'one' })
+  state = transition(state, { type: 'history', epoch: 1, revision: state.revision, sid: 'one', messages: [] })
+  const proposal = { id: 'p', session_id: 'one', request_id: 'r', entity_id: 'light.one', name: '灯', area_name: '客厅', action: 'turn_on' as const, status: 'pending' as const, created_at: '', expires_at: '2099-01-01' }
+  state = transition(state, { type: 'proposal', epoch: 1, revision: state.revision, sid: 'other', proposal })
+  expect(state.proposals).toEqual({})
+  state = transition(state, { type: 'proposal', epoch: 1, revision: state.revision, sid: 'one', proposal })
+  expect(state.proposals.p).toEqual(proposal)
+  state = transition(state, { type: 'identity', epoch: 2 })
+  expect(state.proposals).toEqual({})
+})

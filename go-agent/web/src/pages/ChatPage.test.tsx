@@ -9,13 +9,13 @@ const { sessions, messages, openChatSocket, capabilities, authSupport } = vi.hoi
   messages: vi.fn(async (_sid: string): Promise<{ id: string; messages: ConsoleMessage[] }> => ({ id: 'one', messages: [] })),
   openChatSocket: vi.fn(),
   capabilities: { value: ['chat:use', 'sessions:read'] as string[] },
-  authSupport: { isCurrent: (epoch: number): boolean => epoch === 1, expire: vi.fn(), signal: new AbortController().signal },
+  authSupport: { isCurrent: (epoch: number): boolean => epoch === 1, expire: vi.fn(), signal: new AbortController().signal, epoch: 1, userId: 'alice' },
 }))
 vi.mock('../api', async (importOriginal) => ({ ...(await importOriginal<typeof import('../api')>()), consoleApi: { sessions, messages, me: async () => ({ user: { id: 'alice' } }) } }))
-vi.mock('../coordinator', () => ({ openChatSocket }))
+vi.mock('../coordinator', () => ({ openChatSocket, coordinatedFetch: (url: string, options: RequestInit) => fetch(url, options) }))
 vi.mock('../auth', () => ({ useAuth: () => ({
-  identity: { user: { id: 'alice', username: 'alice', display_name: 'Alice', role: 'member', must_change_password: false }, capabilities: capabilities.value, csrf_token: 'memory-only' },
-  epoch: 1, signal: authSupport.signal, isCurrent: authSupport.isCurrent, expire: authSupport.expire,
+  identity: { user: { id: authSupport.userId, username: 'alice', display_name: 'Alice', role: 'member', must_change_password: false }, capabilities: capabilities.value, csrf_token: 'memory-only' },
+  epoch: authSupport.epoch, signal: authSupport.signal, isCurrent: authSupport.isCurrent, expire: authSupport.expire,
 }) }))
 
 class FakeSocket {
@@ -47,6 +47,9 @@ beforeEach(() => {
   capabilities.value = ['chat:use', 'sessions:read']
   authSupport.isCurrent = (epoch: number) => epoch === 1
   authSupport.signal = new AbortController().signal
+  authSupport.epoch = 1; authSupport.userId = 'alice'
+  vi.stubGlobal('fetch', vi.fn())
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }))
   vi.stubGlobal('WebSocket', FakeSocket)
 })
 
@@ -69,7 +72,7 @@ describe('chat composer', () => {
     await waitFor(() => expect(FakeSocket.sockets).toHaveLength(1))
     fireEvent.click(send)
     FakeSocket.sockets[0].open()
-    await waitFor(() => expect(FakeSocket.sockets[0].sent).toEqual([JSON.stringify({ session_id: '', content: '你好' })]))
+    await waitFor(() => expect(FakeSocket.sockets[0].sent.map((value) => JSON.parse(value))).toEqual([expect.objectContaining({ session_id: '', content: '你好', request_id: expect.any(String) })]))
   })
 
   it('keeps the newly selected SID when an old history request returns 404 late', async () => {
@@ -113,7 +116,7 @@ describe('chat composer', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
     expect(FakeSocket.sockets).toHaveLength(2)
     FakeSocket.sockets[1].open()
-    await waitFor(() => expect(FakeSocket.sockets[1].sent).toEqual([JSON.stringify({ session_id: 'server-one', content: '可能已送达' })]))
+    await waitFor(() => expect(FakeSocket.sockets[1].sent.map((value) => JSON.parse(value))).toEqual([expect.objectContaining({ session_id: 'server-one', content: '可能已送达', request_id: JSON.parse(first.sent[0]).request_id })]))
   })
 
   it('keeps duplicate-risk warning and blocks resend or continue when history recovery fails', async () => {
@@ -274,4 +277,219 @@ it('keeps phone Enter as a newline action and switches history back to a single 
   fireEvent.click(await screen.findByRole('button', { name: /手机旧记录/ }))
   expect(await screen.findByText('手机历史正文')).toBeInTheDocument()
   expect(screen.queryByRole('complementary', { name: '最近对话' })).not.toBeInTheDocument()
+})
+
+const controlProposal = { id: 'p-one', session_id: 'one', request_id: 'r-one', entity_id: 'light.one', name: '客厅主灯', area_name: '客厅', action: 'turn_on', status: 'pending', created_at: '2026-10-09T00:00:00Z', expires_at: '2099-10-09T00:02:00Z', before: { entity_id: 'light.one', name: '客厅主灯', state: 'off', observed_at: '2026-10-09T00:00:00Z' } }
+const historyWithControl = { id: 'one', messages: [{ role: 'assistant', content: '请确认设备操作。', timestamp: '2026-10-09T00:00:00Z', attachments: [{ kind: 'control_proposal' as const, proposal_id: 'p-one' }] }] }
+function reply(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }) }
+it('hydrates history from current proposal state and makes exactly one Cookie/CSRF confirmation for double clicks', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  let finish: (response: Response) => void = () => {}
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  const confirm = await screen.findByRole('button', { name: '确认打开客厅主灯' })
+  expect(transport.mock.calls[0][0]).toBe('/api/console/v1/control/proposals/p-one')
+  fireEvent.click(confirm); fireEvent.click(confirm)
+  expect(transport).toHaveBeenCalledTimes(2)
+  expect(transport.mock.calls[1]).toEqual(['/api/console/v1/control/proposals/p-one/confirm', expect.objectContaining({ method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': 'memory-only' }, body: '{}' })])
+  await act(async () => finish(reply({ ...controlProposal, status: 'succeeded', after: { ...controlProposal.before, state: 'on' } })))
+  expect(screen.getByText('已观察到目标状态')).toBeVisible()
+  expect(screen.queryByRole('button', { name: '确认打开客厅主灯' })).toBeNull()
+})
+it('restores unavailable history attachments with no controls and keeps old text messages readable', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  vi.mocked(fetch).mockResolvedValue(reply({ error: { code: 'not_found' } }, 404))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  expect(await screen.findByText('此设备操作记录暂不可用。')).toBeVisible()
+  expect(screen.getByText('请确认设备操作。')).toBeVisible()
+  expect(screen.queryByRole('button', { name: /确认打开/ })).toBeNull()
+  expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
+})
+it('shows only reconcile after a lost confirmation response and never automatically sends it again', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockRejectedValueOnce(new TypeError('network secret')).mockResolvedValueOnce(reply({ ...controlProposal, status: 'unknown' })).mockResolvedValueOnce(reply({ ...controlProposal, status: 'unknown', after: { ...controlProposal.before, state: 'on' } }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '确认打开客厅主灯' }))
+  const reconcile = await screen.findByRole('button', { name: '核对状态' })
+  expect(screen.queryByRole('button', { name: /确认打开|取消提议/ })).toBeNull()
+  expect(transport).toHaveBeenCalledTimes(2)
+  fireEvent.click(reconcile)
+  await screen.findByText(/核对状态：开启/)
+  expect(transport.mock.calls[2][0]).toBe('/api/console/v1/control/proposals/p-one')
+  expect(transport.mock.calls[3][0]).toBe('/api/console/v1/control/proposals/p-one/reconcile')
+  expect(screen.queryByText(/network secret/)).toBeNull()
+})
+it('rejects late control HTTP results after the user switches sessions', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockImplementation(async (id: string) => id === 'one' ? historyWithControl : { id: 'two', messages: [{ role: 'assistant', content: '另一个对话', timestamp: '2026-10-09T00:00:00Z' }] })
+  sessions.mockResolvedValue({ sessions: [{ id: 'two', preview: '第二对话', started_at: '', last_active_at: '', message_count: 1, round_count: 1 }] })
+  let finish: (response: Response) => void = () => {}
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '确认打开客厅主灯' }))
+  const options = transport.mock.calls[1][1]!
+  fireEvent.click(screen.getByRole('button', { name: /第二对话/ }))
+  await screen.findByText('另一个对话')
+  expect(options.signal?.aborted).toBe(true)
+  await act(async () => finish(reply({ ...controlProposal, status: 'succeeded' })))
+  expect(screen.queryByText('已观察到目标状态')).toBeNull()
+  expect(screen.queryByText('客厅主灯')).toBeNull()
+})
+it('keeps members able to send device queries and correlates a terminal read-only result to the request', async () => {
+  capabilities.value.push('devices:query')
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: '温度是多少' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]; socket.open()
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  const request = JSON.parse(socket.sent[0])
+  expect(request.request_id).toMatch(/^[a-f0-9-]{36}$/)
+  await act(async () => socket.receive({ type: 'session', session_id: 'one' }))
+  await act(async () => socket.receive({ type: 'device_result', session_id: 'other', request_id: request.request_id, device_result: { entity_id: 'sensor.temp', name: '错误对话的温度', state: '99', observed_at: '2026-10-09' } }))
+  expect(screen.queryByText('错误对话的温度')).toBeNull()
+  await act(async () => socket.receive({ type: 'device_result', session_id: 'one', request_id: request.request_id, device_result: { entity_id: 'sensor.temp', name: '客厅温度', state: '24', observed_at: '2026-10-09T00:00:00Z' } }))
+  expect(await screen.findByRole('region', { name: '客厅温度设备状态' })).toHaveTextContent('24')
+  expect(screen.queryByRole('button', { name: /确认打开/ })).toBeNull()
+  expect(screen.getByRole('textbox', { name: '消息内容' })).toBeEnabled()
+  expect(socket.closed).toBe(true)
+})
+
+it('deduplicates confirmation across repeated history references to the same proposal', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue({ ...historyWithControl, messages: [...historyWithControl.messages, { ...historyWithControl.messages[0], timestamp: '2026-10-09T00:00:01Z' }] })
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockImplementation(() => new Promise<Response>(() => {}))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  await screen.findAllByRole('button', { name: '确认打开客厅主灯' })
+  const buttons = screen.getAllByRole('button', { name: '确认打开客厅主灯' })
+  fireEvent.click(buttons[0]); fireEvent.click(buttons[1])
+  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/confirm'))).toHaveLength(1)
+})
+it('clears control cards on identity changes and discards a late confirmation from the previous account', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  let finish: (response: Response) => void = () => {}
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+  const view = render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '确认打开客厅主灯' }))
+  const oldSignal = transport.mock.calls[1][1]?.signal
+  authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+  capabilities.value = ['chat:use', 'sessions:read', 'devices:query']
+  view.rerender(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  expect(screen.queryByText('客厅主灯')).toBeNull()
+  expect(oldSignal?.aborted).toBe(true)
+  await act(async () => finish(reply({ ...controlProposal, status: 'succeeded' })))
+  expect(screen.queryByText('已观察到目标状态')).toBeNull()
+})
+it('uses a terminal proposal frame without writing until the independent confirm button is pressed', async () => {
+  capabilities.value.push('devices:control')
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: '打开客厅主灯' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]; socket.open()
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  const request = JSON.parse(socket.sent[0])
+  await act(async () => socket.receive({ type: 'session', session_id: 'one', request_id: request.request_id }))
+  await act(async () => socket.receive({ type: 'control_proposal', session_id: 'one', request_id: request.request_id, content: '安全提议说明', proposal: { ...controlProposal, request_id: request.request_id } }))
+  expect(await screen.findByRole('button', { name: '确认打开客厅主灯' })).toBeEnabled()
+  expect(screen.getByText('安全提议说明')).toBeVisible()
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '确认' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+  const followup = FakeSocket.sockets[1]; followup.open()
+  await waitFor(() => expect(followup.sent).toHaveLength(1))
+  expect(JSON.parse(followup.sent[0]).request_id).not.toBe(request.request_id)
+})
+it('reads authoritative executing status after a rejected cancellation and never reports withdrawal', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockResolvedValueOnce(reply({ error: { code: 'control_conflict' } }, 409)).mockResolvedValueOnce(reply({ ...controlProposal, status: 'executing' }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '取消提议' }))
+  expect(await screen.findByText('正在执行，无法撤回')).toBeVisible()
+  expect(screen.queryByText(/已取消|已撤回/)).toBeNull()
+  expect(screen.queryByRole('button', { name: '取消提议' })).toBeNull()
+})
+it('rejects a restored proposal whose server session differs from the attachment session', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  vi.mocked(fetch).mockResolvedValueOnce(reply({ ...controlProposal, session_id: 'other' }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  expect(await screen.findByText('此设备操作记录暂不可用。')).toBeVisible()
+  expect(screen.queryByRole('button', { name: /确认打开/ })).toBeNull()
+})
+it('handles a malformed null WebSocket frame as uncertain without crashing or replaying', async () => {
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: '打开灯' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]; socket.open()
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  await act(async () => socket.onmessage?.({ data: 'null' } as MessageEvent))
+  expect(screen.getByRole('alert')).toHaveTextContent('重发可能产生重复')
+  expect(FakeSocket.sockets).toHaveLength(1)
+})
+
+it.each(['succeeded', 'failed', 'pending', 'executing'] as const)('reads current %s state after a lost confirmation before attempting reconcile', async (status) => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply(controlProposal)).mockRejectedValueOnce(new TypeError('lost response'))
+  transport.mockImplementation(async (_url, options) => options?.method === 'POST'
+    ? reply({ error: { code: 'control_conflict' } }, 409)
+    : reply({ ...controlProposal, status }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '确认打开客厅主灯' }))
+  fireEvent.click(await screen.findByRole('button', { name: '核对状态' }))
+  const statusMessages = { succeeded: '已观察到目标状态', failed: '操作未完成，请重新提出需求', pending: '等待确认', executing: '正在执行，无法撤回' }
+  await screen.findByText(statusMessages[status])
+  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/reconcile'))).toHaveLength(0)
+  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/confirm'))).toHaveLength(1)
+  if (status === 'pending') expect(screen.getByRole('button', { name: '确认打开客厅主灯' })).toBeEnabled()
+  else expect(screen.queryByRole('button', { name: /确认打开|取消提议/ })).toBeNull()
+})
+
+it('refreshes current proposal when reconcile races a server status change and receives conflict', async () => {
+  capabilities.value.push('devices:control')
+  messages.mockResolvedValue(historyWithControl)
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply({ ...controlProposal, status: 'unknown' }))
+    .mockResolvedValueOnce(reply({ ...controlProposal, status: 'unknown' }))
+    .mockResolvedValueOnce(reply({ error: { code: 'control_conflict' } }, 409))
+    .mockResolvedValueOnce(reply({ ...controlProposal, status: 'succeeded' }))
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '核对状态' }))
+  expect(await screen.findByText('已观察到目标状态')).toBeVisible()
+  expect(transport.mock.calls.map(([url]) => url)).toEqual([
+    '/api/console/v1/control/proposals/p-one', '/api/console/v1/control/proposals/p-one',
+    '/api/console/v1/control/proposals/p-one/reconcile', '/api/console/v1/control/proposals/p-one',
+  ])
+})
+it.each(['session', 'identity'] as const)('discards a late reconciliation GET after switching %s, without sending a reconcile POST', async (change) => {
+  capabilities.value.push('devices:control')
+  messages.mockImplementation(async (id: string) => id === 'one' ? historyWithControl : { id: 'two', messages: [] })
+  sessions.mockResolvedValue({ sessions: [{ id: 'two', preview: '第二对话', started_at: '2026-10-09', last_active_at: '2026-10-09', message_count: 0, round_count: 0 }] })
+  let finish: (response: Response) => void = () => {}
+  const transport = vi.mocked(fetch)
+  transport.mockResolvedValueOnce(reply({ ...controlProposal, status: 'unknown' })).mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve }))
+  const view = render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  fireEvent.click(await screen.findByRole('button', { name: '核对状态' }))
+  const oldSignal = transport.mock.calls[1][1]?.signal
+  if (change === 'session') fireEvent.click(await screen.findByRole('button', { name: /第二对话/ }))
+  else {
+    authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+    view.rerender(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  }
+  expect(oldSignal?.aborted).toBe(true)
+  await act(async () => finish(reply({ ...controlProposal, status: 'unknown' })))
+  expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/reconcile'))).toHaveLength(0)
+  expect(screen.queryByText('客厅主灯')).toBeNull()
 })

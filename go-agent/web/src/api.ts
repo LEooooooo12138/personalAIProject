@@ -1,4 +1,5 @@
 import { coordinatedFetch } from './coordinator'
+import type { ControlAttachment, DeviceResult } from './chat/control-types'
 
 const API_ROOT = '/api/console/v1'
 
@@ -28,6 +29,8 @@ export interface ConsoleMessage {
   role: string
   content: string
   timestamp: string
+  attachments?: ControlAttachment[]
+  device_result?: DeviceResult
 }
 
 const messages: Record<string, string> = {

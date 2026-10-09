@@ -60,8 +60,14 @@ describe('family directory pages', () => {
       if (url.endsWith('/areas?q=switch.channel_1')) return json({ ...areas, areas: [{ ...areas.areas[0], matches: [{ id: controller.id, name: '客厅三路开关', kind: 'device' }] }] })
       throw new Error(`unexpected query ${url}`)
     }); show(); await screen.findByRole('heading', { name: '家庭区域' })
-    fireEvent.change(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), { target: { value: 'switch.channel_1' } }); fireEvent.click(screen.getByRole('button', { name: '搜索' }))
-    expect(await screen.findByRole('link', { name: /客厅三路开关/ })).toBeInTheDocument(); expect(screen.getByText('2 个设备注册项')).toBeInTheDocument(); expect(screen.getByText('匹配 1 个区域')).toBeInTheDocument()
+    // Drain this immediate mock response and React's route/query effects before
+    // asserting results; the heading alone only proves the page has mounted.
+    await act(async () => {
+      fireEvent.change(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), { target: { value: 'switch.channel_1' } })
+      fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    })
+    expect(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' })).toHaveValue('switch.channel_1')
+    expect(screen.getByRole('link', { name: /客厅三路开关/ })).toBeInTheDocument(); expect(screen.getByText('2 个设备注册项')).toBeInTheDocument(); expect(screen.getByText('匹配 1 个区域')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /其他.*设备注册项/ })).not.toBeInTheDocument()
   })
   it('marks entity overrides and does not claim a verified physical load location', async () => {
@@ -225,4 +231,24 @@ it('synchronizes the search draft and actual results when router history moves b
   expect(search).toHaveValue('A')
   expect(screen.getByLabelText('测试搜索位置')).toHaveTextContent('/app/areas?q=A')
   expect(screen.queryByRole('link', { name: /RESULT-B/ })).not.toBeInTheDocument()
+})
+it('keeps a submitted area search authoritative while the initial directory load is still pending', async () => {
+  let release!: (response: Response) => void
+  const initial = new Promise<Response>((resolve) => { release = resolve })
+  const calls: string[] = []
+  transport(async (url) => {
+    calls.push(url)
+    if (url.endsWith('/areas')) return initial
+    if (url.endsWith('/areas?q=switch.channel_1')) return json({ ...areas, areas: [{ ...areas.areas[0], matches: [{ id: controller.id, name: '客厅三路开关', kind: 'device' }] }] })
+    throw new Error(`unexpected query ${url}`)
+  })
+  show()
+  await screen.findByText('正在读取家庭目录…')
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), { target: { value: 'switch.channel_1' } })
+  fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+  await screen.findByRole('link', { name: /客厅三路开关/ })
+  expect(calls).toEqual(['/api/console/v1/areas', '/api/console/v1/areas?q=switch.channel_1'])
+  await act(async () => release(json(areas)))
+  expect(screen.getByText('匹配 1 个区域')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /其他.*设备注册项/ })).not.toBeInTheDocument()
 })

@@ -55,10 +55,16 @@ describe('knowledge workflows', () => {
     let fail = false
     show('/app/knowledge', 'member', (path) => path.startsWith('/knowledge/search') ? fail ? failure('unavailable', 503) : Response.json({ results: [], count: 0 }) : undefined)
     const input = await screen.findByLabelText('搜索公开知识')
-    fireEvent.change(input, { target: { value: '不存在' } }); fireEvent.click(screen.getByRole('button', { name: '搜索知识' }))
-    expect(await screen.findByText('没有找到可读取的公开资料。')).toBeInTheDocument()
-    fail = true; fireEvent.click(screen.getByRole('button', { name: '搜索知识' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('服务暂时不可用')
+    // The transport settles immediately, so await React's async query update
+    // explicitly rather than racing a wall-clock findBy timeout under load.
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '不存在' } })
+      fireEvent.click(screen.getByRole('button', { name: '搜索知识' }))
+    })
+    expect(screen.getByText('没有找到可读取的公开资料。')).toBeInTheDocument()
+    fail = true
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '搜索知识' })))
+    expect(screen.getByRole('alert')).toHaveTextContent('服务暂时不可用')
     expect(screen.queryByText('没有找到可读取的公开资料。')).not.toBeInTheDocument()
     expect(screen.queryByText('SECRET RAW ERROR')).not.toBeInTheDocument()
   })
