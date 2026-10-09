@@ -1,5 +1,6 @@
 """Offline regression tests. All services and vaults are temporary fixtures."""
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,7 +29,8 @@ class IntegrationScriptTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.env = os.environ.copy()
         self.env.update(PYTHON=Path(sys.executable).as_posix())
-        for key in ("AGENT_INTERNAL_KEY", "API_KEY", "PERSONAL_VAULT", "AGENT_VAULT"):
+        for key in ("AGENT_INTERNAL_KEY", "API_KEY", "PERSONAL_VAULT", "AGENT_VAULT",
+                    "RAG_TEST_QUERY", "RAG_EXPECTED_SOURCE_PATH", "RAG_EXPECTED_TEXT"):
             self.env.pop(key, None)
 
     def run_script(self, script, env=None):
@@ -148,11 +150,13 @@ case "$url" in
   */internal/smarthome/devices) printf '{"devices":[]}' ;;
   */internal/smarthome/suggestions) printf '{"suggestions":[]}' ;;
   */internal/smarthome/analyze) printf '{"report":{}}' ;;
-  */v1/chat/completions) printf '{"choices":[{"message":{"content":"fixture answer"}}]}' ;;
+  */v1/chat/completions) cat "$CHAT_FIXTURE" ;;
   */v1/models) printf '{"data":[{"id":"fixture"}]}' ;;
   *) printf 'unexpected fixture URL' >&2; exit 98 ;;
 esac
 ''')
+        self.env["CHAT_FIXTURE"] = (self.root / "chat.json").as_posix()
+        self.write(self.root / "chat.json", json.dumps({"choices": [{"message": {"content": "fixture answer"}}]}))
         for name in ("python", "python3"):
             self.write(bindir / name, '#!/usr/bin/env bash\nexec "$PYTHON" "$@"\n')
 
@@ -184,6 +188,47 @@ esac
         calls = Path(self.env["CURL_LOG"]).read_text()
         self.assertNotIn("/confirm", calls)
         self.assertNotIn("/api/services", calls)
+
+    def full_chain_fixture(self, content="fixture fact 7391", sources=None):
+        self.fake_services()
+        payload = {"choices": [{"message": {"content": content}}]}
+        if sources is not None:
+            payload["sources"] = sources
+        self.write(self.root / "chat.json", json.dumps(payload))
+        return {"AGENT_INTERNAL_KEY": "fixture-token", "AGENT_URL": "http://fixture.invalid",
+                "RAG_TEST_QUERY": 'What is "fixture"?\nUse the vault.',
+                "RAG_EXPECTED_SOURCE_PATH": "entities/fixture.md",
+                "RAG_EXPECTED_TEXT": "fixture fact 7391"}
+
+    def test_full_chain_requires_explicit_rag_fixture_before_network(self):
+        self.fake_services()
+        result = self.run_script(ROOT / PHASES[3], {"AGENT_INTERNAL_KEY": "fixture-token"})
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(Path(self.env["CURL_LOG"]).exists())
+
+    def test_full_chain_rejects_nonempty_answer_without_sources(self):
+        result = self.run_script(ROOT / PHASES[3], self.full_chain_fixture())
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_full_chain_rejects_wrong_source(self):
+        result = self.run_script(ROOT / PHASES[3], self.full_chain_fixture(sources=[{"path": "other.md"}]))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_full_chain_rejects_missing_unique_fact(self):
+        result = self.run_script(ROOT / PHASES[3], self.full_chain_fixture(
+            content="some plausible answer", sources=[{"path": "entities/fixture.md"}]))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_full_chain_checks_fact_source_and_json_safe_query(self):
+        result = self.run_script(ROOT / PHASES[3], self.full_chain_fixture(
+            sources=[{"path": "entities/fixture.md", "title": "Fixture"}]))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("RAG fact and source verified", result.stdout)
+        calls = Path(self.env["CURL_LOG"]).read_text()
+        chat_calls = [line for line in calls.splitlines() if "/v1/chat/completions" in line]
+        self.assertEqual(len(chat_calls), 2, calls)
+        payload = json.loads(chat_calls[-1].split(" -d ", 1)[1])
+        self.assertEqual(payload["messages"][0]["content"], 'What is "fixture"?\nUse the vault.')
 
 
 if __name__ == "__main__":

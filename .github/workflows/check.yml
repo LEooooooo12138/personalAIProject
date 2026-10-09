@@ -1,4 +1,4 @@
-﻿name: Check
+name: Check
 on: [push, pull_request]
 
 jobs:
@@ -21,6 +21,50 @@ jobs:
 
       - name: Offline integration script fixtures
         run: python3 -m unittest discover -s tests/integration -p 'test_*.py' -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: go-agent/web/package-lock.json
+
+      - name: Install console frontend dependencies
+        working-directory: go-agent/web
+        run: npm ci
+
+      - name: Console frontend typecheck and behavior
+        working-directory: go-agent/web
+        run: |
+          npm run typecheck
+          node --check public/assets/console-auth-worker.js
+          npm test
+
+      - name: Build console static files
+        working-directory: go-agent/web
+        run: npm run build
+
+      - name: Install console test browser
+        working-directory: go-agent/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Console browser integration with temporary Go backend
+        working-directory: go-agent/web
+        run: npm run test:e2e
+
+      - name: Preserve console browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-browser-failures
+          path: |
+            go-agent/web/playwright-report/
+            go-agent/web/test-results/
+          retention-days: 7
+
+      - name: Browser session behavior
+        run: |
+          node --check go-agent/static/chat-widget.js
+          node --test tests/frontend/*.test.cjs
 
       - name: Go build (linux)
         run: cd go-agent && GOOS=linux GOARCH=amd64 go build -o agentd ./cmd/agentd

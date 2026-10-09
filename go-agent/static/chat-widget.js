@@ -214,12 +214,26 @@
   var historyLoaded = false;
   try { sessionID = localStorage.getItem("chat-widget-sid") || ""; } catch (e) {}
 
+  function resetExpiredSession(expectedSID) {
+    if (!expectedSID || sessionID !== expectedSID) return false;
+    sessionID = "";
+    historyLoaded = false;
+    try { localStorage.removeItem("chat-widget-sid"); } catch (e) {}
+    appendMessage("assistant", "会话已失效，下一条消息将开启新会话。请重新发送需要回答的问题。");
+    return true;
+  }
+
   function loadHistory(userId) {
     var apiBase = cfg.endpoint.replace("/channels/webchat/ws", "").replace("ws://", "http://").replace("wss://", "https://");
     var url = apiBase + "/sessions/webchat/" + encodeURIComponent(userId) + "/messages";
     fetch(url, { credentials: "include" })
-      .then(function(r) { return r.json(); })
+      .then(function(r) {
+        if (r.status === 404) { resetExpiredSession(userId); return null; }
+        if (!r.ok) throw new Error("History unavailable");
+        return r.json();
+      })
       .then(function(data) {
+        if (!data || sessionID !== userId) return;
         historyLoaded = true;
         var msgs = data.messages || [];
         if (msgs.length > 0) {
@@ -234,6 +248,7 @@
         }
       })
       .catch(function() {
+        if (sessionID !== userId) return;
         historyLoaded = true;
         // On error, show greeting if panel is still empty.
         if (cfg.greeting && messages.children.length === 0) {
@@ -418,6 +433,7 @@
             appendMessage("assistant", data.content);
         }
       } else if (data.type === "error") {
+        if (data.code === "session_not_found" && resetExpiredSession(data.session_id)) return;
         appendMessage("assistant", "[Error] " + (data.message || "unknown error"));
       }
     };
