@@ -49,10 +49,16 @@ type Session struct {
 
 // Message is a single turn in a conversation.
 // 一条消息 = 谁说的 + 说了什么 + 什么时候说的
+type MessageAttachment struct {
+	Kind       string `json:"kind"`
+	ProposalID string `json:"proposal_id"`
+}
+
 type Message struct {
-	Role      string    `json:"role"`    // "user" 或 "assistant"
-	Content   string    `json:"content"` // 消息正文
-	Timestamp time.Time `json:"timestamp"`
+	Attachments []MessageAttachment `json:"attachments,omitempty"`
+	Role        string              `json:"role"`    // "user" 或 "assistant"
+	Content     string              `json:"content"` // 消息正文
+	Timestamp   time.Time           `json:"timestamp"`
 }
 
 // ── Session Key ──
@@ -236,6 +242,7 @@ func (m *SessionManager) AddMessage(s *Session, msg Message) bool {
 		return false
 	}
 
+	msg.Attachments = append([]MessageAttachment(nil), msg.Attachments...)
 	s.Messages = append(s.Messages, msg)
 	s.LastActiveAt = time.Now()
 
@@ -402,5 +409,8 @@ func CloneSession(s *Session) *Session {
 		CreatedAt:    s.CreatedAt,
 	}
 	copy(clone.Messages, s.Messages)
+	for i := range clone.Messages {
+		clone.Messages[i].Attachments = append([]MessageAttachment(nil), s.Messages[i].Attachments...)
+	}
 	return clone
 }

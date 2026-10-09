@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/yuanleyao/ai-agent/internal/console"
+	"github.com/yuanleyao/ai-agent/internal/smarthome"
 )
 
 func (s *Server) consoleChatAvailable() bool {
@@ -42,6 +43,20 @@ func (s *Server) handleConsoleChat(c *gin.Context) {
 	defer conn.Close()
 	go func() { <-ctx.Done(); conn.Close() }()
 	options := webChatOptions{ChannelID: "console", VaultName: "agent", IndexMessages: false,
+		ControlChat: s.controlChat,
+		AuthorizeControl: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			p, err := s.consoleStore.Resolve(token)
+			if err != nil {
+				return err
+			}
+			if p.Role != "admin" || p.MustChangePassword {
+				return smarthome.ErrControlForbidden
+			}
+			return nil
+		},
 		ValidateSession: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -67,6 +82,12 @@ func (s *Server) consoleCapabilities(role string, restricted bool) []string {
 		return capabilities
 	}
 	capabilities = append(capabilities, "areas:read")
+	if s.controlChat != nil {
+		capabilities = append(capabilities, "devices:query")
+	}
+	if s.control != nil && role == "admin" && len(s.cfg.SmartHome.Control.Targets) > 0 {
+		capabilities = append(capabilities, "devices:control")
+	}
 	if s.vaultR != nil {
 		capabilities = append(capabilities, "knowledge:read")
 		if role == "admin" {

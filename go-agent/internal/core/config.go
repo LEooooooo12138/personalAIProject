@@ -86,12 +86,13 @@ type ChannelsConfig struct {
 
 // SmartHomeConfig holds Home Assistant connection and automation settings.
 type SmartHomeConfig struct {
-	OAuthCredentialsFile string `mapstructure:"oauth_credentials_file"`
-	Enabled              bool   `mapstructure:"enabled"`
-	BaseURL              string `mapstructure:"base_url"`
-	Token                string `mapstructure:"token"`
-	PollIntervalSec      int    `mapstructure:"poll_interval_sec"`
-	AnalysisHour         int    `mapstructure:"analysis_hour"`
+	Control              HAControlConfig `mapstructure:"control"`
+	OAuthCredentialsFile string          `mapstructure:"oauth_credentials_file"`
+	Enabled              bool            `mapstructure:"enabled"`
+	BaseURL              string          `mapstructure:"base_url"`
+	Token                string          `mapstructure:"token"`
+	PollIntervalSec      int             `mapstructure:"poll_interval_sec"`
+	AnalysisHour         int             `mapstructure:"analysis_hour"`
 	// TimeZone optionally checks HA's authoritative time zone; it never overrides it.
 	TimeZone string `mapstructure:"time_zone"`
 	// AgentVaultPath is where rule documents and reports are written.
@@ -196,6 +197,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	if err := cfg.ValidateConsole(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateHAControl(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

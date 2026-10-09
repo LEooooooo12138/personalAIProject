@@ -26,6 +26,7 @@ func isConsoleManagementPath(path string) bool {
 
 func (s *Server) setupConsoleRoutes(r *gin.Engine) {
 	g := r.Group(consolePrefix)
+	s.setupConsoleControlRoutes(g)
 	s.setupConsoleKnowledgeRoutes(g)
 	s.setupConsoleSmartHomeRoutes(g)
 	g.GET("/auth/status", s.handleConsoleStatus)

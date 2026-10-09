@@ -77,6 +77,23 @@ smarthome:
   # Optional expectation check only; HA /api/config.time_zone is authoritative.
   # A mismatch blocks time suggestions and confirmation until resolved.
   time_zone: ""
+  # Chat controls are opt-in and require the authenticated Console.
+  control:
+    enabled: false
+    proposal_ttl: 120s
+    readback_timeout: 10s
+    readback_interval: 500ms
+    retention: 720h
+    max_records: 10000
+    targets: []
+    # Replace with a physically verified low-risk load; never copy this entity ID.
+    # targets:
+    #   - entity_id: light.example_verified_load
+    #     name: "客厅台灯"
+    #     area_name: "客厅"
+    #     aliases: ["阅读灯"]
+    #     allowed_actions: ["turn_on", "turn_off"]
+    #     load_location_verified: true
 
 logging:
   level: "info"

@@ -18,7 +18,9 @@ import (
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
+	"github.com/yuanleyao/ai-agent/internal/smarthome"
 	"github.com/yuanleyao/ai-agent/internal/vault"
+	"strings"
 )
 
 var upgrader = websocket.Upgrader{
@@ -28,6 +30,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type wsConn struct {
+	requestID  string
 	options    webChatOptions
 	conn       *websocket.Conn
 	logger     *zap.Logger
@@ -54,22 +57,28 @@ type wsConn struct {
 // These options are server-owned and never decoded from client messages.
 type webChatOptions struct {
 	ChannelID, VaultName string
+	ControlChat          *core.ControlChat
+	AuthorizeControl     func(context.Context) error
 	IndexMessages        bool
 	ValidateSession      func(context.Context) error
 	WithSession          func(context.Context, func(context.Context) error) error
 }
 
 type clientMessage struct {
+	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id"`
 	Content   string `json:"content"`
 }
 
 type serverMessage struct {
-	Code      string `json:"code,omitempty"`
-	Type      string `json:"type"`
-	Content   string `json:"content,omitempty"`
-	Message   string `json:"message,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
+	RequestID    string                       `json:"request_id,omitempty"`
+	Proposal     *smarthome.ControlProposal   `json:"proposal,omitempty"`
+	DeviceResult *smarthome.DeviceQueryResult `json:"device_result,omitempty"`
+	Code         string                       `json:"code,omitempty"`
+	Type         string                       `json:"type"`
+	Content      string                       `json:"content,omitempty"`
+	Message      string                       `json:"message,omitempty"`
+	SessionID    string                       `json:"session_id,omitempty"`
 }
 
 type vaultSource struct {
@@ -140,6 +149,14 @@ func (w *wsConn) loop() {
 			continue
 		}
 
+		if len(msg.RequestID) > 128 || strings.ContainsAny(msg.RequestID, " /\\\t\r\n") {
+			w.writeJSON(serverMessage{Type: "error", Code: "invalid_request", Message: "invalid request id"})
+			continue
+		}
+		w.requestID = msg.RequestID
+		if w.requestID == "" {
+			w.requestID = newSessionID()
+		}
 		if w.sessionID == "" {
 			if w.sessionStore == nil {
 				w.writeJSON(serverMessage{Type: "error", Message: "session store unavailable"})
@@ -191,6 +208,9 @@ func (w *wsConn) handleChatContext(generationContext context.Context, content st
 		return
 	}
 	w.session = session
+	if w.options.ControlChat != nil && w.handleControlReplay(generationContext, content, session) {
+		return
+	}
 
 	if ok := w.sessionMgr.AddMessage(session, core.Message{
 		Role: "user", Content: content, Timestamp: time.Now(),
@@ -237,6 +257,9 @@ func (w *wsConn) handleChatContext(generationContext context.Context, content st
 					w.logger.Warn("session indexing failed", zap.Error(err))
 				}
 			}()
+		}
+		if w.options.ControlChat != nil && w.handleControlChat(generationContext, content, session) {
+			return
 		}
 		w.handleChatWithChain(generationContext, content, session)
 		return

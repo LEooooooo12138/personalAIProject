@@ -27,6 +27,8 @@ import (
 )
 
 type Server struct {
+	control     *smarthome.ControlService
+	controlChat *core.ControlChat
 	sessionMgr  *core.SessionManager
 	embedStore  *vault.EmbeddingStore
 	cfg         *core.Config
@@ -107,6 +109,8 @@ func NewServerFromApp(app *core.App) *Server {
 		sedimenter:    app.Sedimenter,
 		smartHome:     app.SmartHome,
 		consoleStore:  app.ConsoleStore,
+		control:       app.Control,
+		controlChat:   app.ControlChat,
 	}
 	_ = embedStore
 	s.setupRoutes()

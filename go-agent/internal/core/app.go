@@ -47,7 +47,9 @@ type App struct {
 	AgentEmbedStore *vault.EmbeddingStore
 
 	// Smart home subsystem (Phase 4).
-	SmartHome *smarthome.Manager
+	SmartHome   *smarthome.Manager
+	Control     *smarthome.ControlService
+	ControlChat *ControlChat
 
 	Agent  *Agent
 	Server interface {
@@ -168,6 +170,16 @@ func Bootstrap(configPath string) (*App, error) {
 		}
 	}
 
+	if cfg.SmartHome.Control.Enabled {
+		if app.SmartHome == nil {
+			return nil, fmt.Errorf("control: Home Assistant manager unavailable")
+		}
+		app.Control, err = smarthome.NewControlService(cfg.SmartHome.Control.ServiceConfig(), app.SmartHome.ControlCatalog(), app.SmartHome.GetClient(), cfg.Console.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("control: %w", err)
+		}
+		app.ControlChat = NewControlChat(app.Control, chain.NewHAIntentParser(app.Infer, cfg.Inference.Models.Local))
+	}
 	// Chain system
 	embedSearchAdapter := chain.NewVaultEmbeddingStoreAdapter(
 		func(ctx context.Context, vaultName, query string, k int) ([]vault.EmbeddingResult, error) {
