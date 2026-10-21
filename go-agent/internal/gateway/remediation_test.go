@@ -106,10 +106,10 @@ func TestBrowserIdentityCannotManageOrReadOtherConversations(t *testing.T) {
 	conn := dialBrowser(t, ts, alice)
 	conn.WriteJSON(clientMessage{Content: "hello"})
 	var identity, answer serverMessage
-	if err := conn.ReadJSON(&identity); err != nil {
+	if err := readChatMessage(conn, &identity); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.ReadJSON(&answer); err != nil {
+	if err := readChatMessage(conn, &answer); err != nil {
 		t.Fatal(err)
 	}
 	if answer.Type != "response" || strings.Contains(answer.Content, "fake-value") {
@@ -129,14 +129,14 @@ func TestBrowserIdentityCannotManageOrReadOtherConversations(t *testing.T) {
 	other := dialBrowser(t, ts, bob)
 	other.WriteJSON(clientMessage{SessionID: identity.SessionID, Content: "steal"})
 	var denied serverMessage
-	other.ReadJSON(&denied)
+	readChatMessage(other, &denied)
 	if denied.Type != "error" {
 		t.Fatalf("foreign session resumed: %+v", denied)
 	}
 	resumed := dialBrowser(t, ts, alice)
 	resumed.WriteJSON(clientMessage{SessionID: identity.SessionID, Content: "again"})
-	resumed.ReadJSON(&identity)
-	resumed.ReadJSON(&answer)
+	readChatMessage(resumed, &identity)
+	readChatMessage(resumed, &answer)
 	req, _ = http.NewRequest("GET", ts.URL+"/sessions/webchat/"+identity.SessionID+"/messages", nil)
 	req.AddCookie(alice)
 	resp, err = http.DefaultClient.Do(req)
@@ -284,13 +284,13 @@ func TestWebChatRoundLimitRotatesAfterACompleteExchange(t *testing.T) {
 			t.Fatal(err)
 		}
 		var identity, response serverMessage
-		if err := conn.ReadJSON(&identity); err != nil {
+		if err := readChatMessage(conn, &identity); err != nil {
 			t.Fatal(err)
 		}
 		if identity.Type != "session" || identity.SessionID == previous {
 			t.Fatalf("missing fresh session: %+v", identity)
 		}
-		if err := conn.ReadJSON(&response); err != nil {
+		if err := readChatMessage(conn, &response); err != nil {
 			t.Fatal(err)
 		}
 		if response.Type != "response" {
@@ -325,9 +325,10 @@ func TestWebSocketClosesWhenServerContextIsCancelled(t *testing.T) {
 			if active {
 				conn.WriteJSON(clientMessage{Content: "wait"})
 				var identity serverMessage
-				if err := conn.ReadJSON(&identity); err != nil {
+				if err := readChatMessage(conn, &identity); err != nil {
 					t.Fatal(err)
 				}
+				readStagesThrough(t, conn, "generating")
 				select {
 				case <-started:
 				case <-time.After(time.Second):

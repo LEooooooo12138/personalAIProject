@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yuanleyao/ai-agent/internal/core"
 )
 
@@ -318,5 +319,51 @@ func TestConsoleRateLimitRollingWindowAndBoundedBuckets(t *testing.T) {
 	now = now.Add(5 * time.Minute)
 	if !bounded.allow("overflow", "user") {
 		t.Fatal("expired buckets not reclaimed")
+	}
+}
+
+func TestConsoleExpectedIdentityPrecondition(t *testing.T) {
+	s := consoleTestServer(t, testConsoleOrigin)
+	id := consoleBootstrap(t, s)
+	cookie, csrf, _ := consoleLogin(t, s, "owner", testConsolePassword, testConsoleOrigin)
+	otherCookie, otherCSRF, _ := consoleLogin(t, s, "owner", testConsolePassword, testConsoleOrigin)
+	called := 0
+	s.engine.GET(consolePrefix+"/precondition-test", s.consoleMiddleware(), func(c *gin.Context) { called++; c.Status(204) })
+	s.engine.POST(consolePrefix+"/precondition-test", s.consoleMiddleware(), func(c *gin.Context) { called++; c.Status(204) })
+	cases := []struct {
+		name, method, user, csrf, origin string
+		cookie                           *http.Cookie
+		status                           int
+	}{
+		{"different user", "GET", "previous-user", csrf, "", cookie, 401},
+		{"same user different session", "GET", id, csrf, "", otherCookie, 401},
+		{"correct identity", "GET", id, otherCSRF, "", otherCookie, 204},
+		{"old client", "GET", "", "", "", cookie, 204},
+		{"write origin still checked", "POST", id, csrf, "https://evil.example", cookie, 403},
+		{"old write csrf still checked", "POST", "", "wrong", testConsoleOrigin, cookie, 403},
+		{"correct write", "POST", id, csrf, testConsoleOrigin, cookie, 204},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := called
+			r := httptest.NewRequest(tc.method, consolePrefix+"/precondition-test", nil)
+			r.AddCookie(tc.cookie)
+			if tc.user != "" {
+				r.Header.Set("X-Console-Expected-User", tc.user)
+			}
+			r.Header.Set("X-CSRF-Token", tc.csrf)
+			r.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			s.engine.ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", w.Code, tc.status, w.Body.String())
+			}
+			if tc.status != 204 && called != before {
+				t.Fatal("handler ran for a rejected identity")
+			}
+			if tc.status == 401 && !strings.Contains(w.Body.String(), `"code":"identity_changed"`) {
+				t.Fatalf("error=%s", w.Body.String())
+			}
+		})
 	}
 }

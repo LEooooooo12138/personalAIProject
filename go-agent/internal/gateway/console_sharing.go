@@ -73,7 +73,12 @@ func (s *Server) handleConsolePutSharing(c *gin.Context) {
 		}
 		byID := map[string]bool{}
 		for _, item := range items {
-			byID[item.ID] = visibleSuggestion(suggestionProjection(item, false, true), entities)
+			view, err := s.consoleSuggestionInstallation(item, suggestionProjection(item, false, true, nil), false)
+			if err != nil {
+				s.consoleSuggestionError(c, err)
+				return
+			}
+			byID[item.ID] = visibleSuggestion(view, entities)
 		}
 		for _, id := range body.SuggestionIDs {
 			if !byID[id] {

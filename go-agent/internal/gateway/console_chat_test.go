@@ -86,14 +86,14 @@ func TestConsoleCrossDeviceOwnerIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var msg serverMessage
-	if err := conn.ReadJSON(&msg); err != nil {
+	if err := readChatMessage(conn, &msg); err != nil {
 		t.Fatal(err)
 	}
 	sid := msg.SessionID
 	if sid == "" || strings.HasPrefix(sid, "console:") {
 		t.Fatalf("invalid public SID: %+v", msg)
 	}
-	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "response" {
+	if err := readChatMessage(conn, &msg); err != nil || msg.Type != "response" {
 		t.Fatalf("answer: %+v %v", msg, err)
 	}
 	for _, cookie := range []*http.Cookie{a, a2} {
@@ -170,8 +170,14 @@ func TestConsoleFinalPublicationOrdering(t *testing.T) {
 				}
 				defer conn.Close()
 				go func() { <-ctx.Done(); conn.Close() }()
+				guardCalls := 0
 				w := &wsConn{conn: conn, ctx: ctx, owner: "console:" + user.ID, sessionID: "boundary", session: session, logger: s.logger, sessionMgr: s.sessionMgr, sessionStore: s.sessionStore, chainExecutor: s.chainExecutor, chainRouter: s.chainRouter, filter: s.filterChain,
 					options: webChatOptions{ChannelID: "console", VaultName: "agent", WithSession: func(ctx context.Context, fn func(context.Context) error) error {
+						guardCalls++
+						// Four stage writes and entry persistence precede the final publication guard.
+						if guardCalls <= 5 {
+							return s.consoleStore.WithSession(ctx, cookie.Value, fn)
+						}
 						if !inside {
 							close(entered)
 							<-release
@@ -194,6 +200,7 @@ func TestConsoleFinalPublicationOrdering(t *testing.T) {
 			}
 			defer conn.Close()
 			conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			readStagesThrough(t, conn, "saving")
 			select {
 			case <-entered:
 			case <-time.After(time.Second):
@@ -333,10 +340,11 @@ func TestConsoleRevokesIdleAndBusySockets(t *testing.T) {
 				if busy {
 					conn.WriteJSON(clientMessage{Content: "question"})
 					var identity serverMessage
-					if err := conn.ReadJSON(&identity); err != nil {
+					if err := readChatMessage(conn, &identity); err != nil {
 						t.Fatal(err)
 					}
 					sid = identity.SessionID
+					readStagesThrough(t, conn, "generating")
 					select {
 					case <-began:
 					case <-time.After(time.Second):
@@ -448,7 +456,7 @@ func TestConsoleQueuedRevocationDoesNotAppendOrGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	var identity, response serverMessage
-	if err := first.ReadJSON(&identity); err != nil {
+	if err := readChatMessage(first, &identity); err != nil {
 		t.Fatal(err)
 	}
 	sid := identity.SessionID
@@ -464,6 +472,7 @@ func TestConsoleQueuedRevocationDoesNotAppendOrGenerate(t *testing.T) {
 	if err := queued.ReadJSON(&identity); err != nil || identity.Type != "session" {
 		t.Fatalf("queued resume: %+v %v", identity, err)
 	}
+	readStagesThrough(t, queued, "queued")
 	if err := s.consoleStore.Logout(queuedCookie.Value); err != nil {
 		t.Fatal(err)
 	}
@@ -473,14 +482,14 @@ func TestConsoleQueuedRevocationDoesNotAppendOrGenerate(t *testing.T) {
 		t.Fatal("queued socket remained open after logout")
 	}
 	unblock()
-	if err := first.ReadJSON(&response); err != nil || response.Content != "answer first" {
+	if err := readChatMessage(first, &response); err != nil || response.Content != "answer first" {
 		t.Fatalf("other login interrupted: %+v %v", response, err)
 	}
 	// A subsequent turn also proves the canceled waiter releases its turn slot.
 	if err := first.WriteJSON(clientMessage{Content: "after"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.ReadJSON(&response); err != nil || response.Content != "answer after" {
+	if err := readChatMessage(first, &response); err != nil || response.Content != "answer after" {
 		t.Fatalf("turn remained blocked: %+v %v", response, err)
 	}
 	messages, err := s.sessionStore.OwnedMessages("console", sid, "console:"+user.ID)

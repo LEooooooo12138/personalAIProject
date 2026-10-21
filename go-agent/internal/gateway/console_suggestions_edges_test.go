@@ -108,7 +108,9 @@ func TestConsoleAnalyzeConcurrentRequestReturnsBusyCode(t *testing.T) {
 	if result["error"].(map[string]any)["code"] != "busy" {
 		t.Fatal("busy response indistinguishable:", result)
 	}
-	first := consoleJSON(t, <-done, 200)
+	accepted := consoleJSON(t, <-done, 202)
+	run := awaitConsoleAnalysis(t, s, accepted["run_id"].(string))
+	first := map[string]any{"suggestion_count": float64(run.Counts.Suggestions), "period_start": run.RequestedWindow.Start, "period_end": run.RequestedWindow.End}
 	if first["suggestion_count"] != float64(0) || first["period_start"] == nil || first["period_end"] == nil {
 		t.Fatal(first)
 	}
@@ -125,7 +127,9 @@ func TestConsoleAnalyzeProducesUnboundSuggestionWithoutInstalling(t *testing.T) 
 		t.Fatal(err)
 	}
 	admin, csrf, _ := consoleLogin(t, s, "Owner", testConsolePassword, testConsoleOrigin)
-	result := consoleJSON(t, consoleRequest(s, "POST", consolePrefix+"/admin/analyze", `{"days":14}`, admin, csrf, testConsoleOrigin, ""), 200)
+	accepted := consoleJSON(t, consoleRequest(s, "POST", consolePrefix+"/admin/analyze", `{"days":14}`, admin, csrf, testConsoleOrigin, ""), 202)
+	run := awaitConsoleAnalysis(t, s, accepted["run_id"].(string))
+	result := map[string]any{"suggestion_count": float64(run.Counts.Suggestions)}
 	if result["suggestion_count"] != float64(1) || writes.Load() != 0 {
 		t.Fatalf("analysis installs or lacks real pattern: %v", result)
 	}

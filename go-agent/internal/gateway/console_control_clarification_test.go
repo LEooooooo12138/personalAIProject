@@ -67,12 +67,12 @@ func TestControlInvalidIntentPublishesPersistedClarification(t *testing.T) {
 		t.Fatal(err)
 	}
 	var event serverMessage
-	if err := conn.ReadJSON(&event); err != nil || event.Type != "session" {
+	if err := readChatMessage(conn, &event); err != nil || event.Type != "session" {
 		t.Fatalf("session frame: %+v %v", event, err)
 	}
 	sid := event.SessionID
 	event = serverMessage{}
-	if err := conn.ReadJSON(&event); err != nil || event.Type != "response" || event.SessionID != sid || event.RequestID != "rejected-request" || event.Proposal != nil || event.DeviceResult != nil {
+	if err := readChatMessage(conn, &event); err != nil || event.Type != "response" || event.SessionID != sid || event.RequestID != "rejected-request" || event.Proposal != nil || event.DeviceResult != nil {
 		t.Fatalf("invalid intent did not finish with a correlated clarification: %+v %v", event, err)
 	}
 	if !strings.Contains(event.Content, "完整设备名称") || !strings.Contains(event.Content, "已配置别名") || ha.writes.Load() != 0 {
@@ -107,19 +107,26 @@ func TestControlClarificationSaveFailureRemainsUncertain(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(s.cfg.Vaults.Agent, "_sessions", fmt.Sprintf("%x.json", sha256.Sum256([]byte("console:"+sid))))
-	if err := os.Mkdir(file, 0700); err != nil {
-		t.Fatal(err)
-	}
+	// Fail the result save after the entry binding has durably succeeded.
+	s.controlChat = core.NewControlChat(s.control, observationIntent(func(context.Context, string, chain.HACandidates) (chain.HAIntent, error) {
+		if err := os.Remove(file); err != nil {
+			return chain.HAIntent{}, err
+		}
+		if err := os.Mkdir(file, 0700); err != nil {
+			return chain.HAIntent{}, err
+		}
+		return chain.HAIntent{}, chain.ErrHAIntentInvalid
+	}))
 	conn := dialConsole(t, ts, admin)
 	if err := conn.WriteJSON(clientMessage{SessionID: sid, RequestID: "save-failure", Content: "打开书房灯"}); err != nil {
 		t.Fatal(err)
 	}
 	var event serverMessage
-	if err := conn.ReadJSON(&event); err != nil || event.Type != "session" {
+	if err := readChatMessage(conn, &event); err != nil || event.Type != "session" {
 		t.Fatalf("session frame: %+v %v", event, err)
 	}
 	event = serverMessage{}
-	if err := conn.ReadJSON(&event); err != nil || event.Type != "error" || event.Content != "" || event.Proposal != nil || event.DeviceResult != nil || !strings.Contains(event.Message, "未能保存") || ha.writes.Load() != 0 {
+	if err := readChatMessage(conn, &event); err != nil || event.Type != "error" || event.Outcome != "unknown" || event.Code != "chat_publish_failed" || event.Content != "" || event.Proposal != nil || event.DeviceResult != nil || !strings.Contains(event.Message, "未能保存") || ha.writes.Load() != 0 {
 		t.Fatalf("failed persistence became a settled response: %+v %v writes=%d", event, err, ha.writes.Load())
 	}
 }
@@ -129,10 +136,11 @@ func TestControlDispatchLogsOnlyBoundedErrorClass(t *testing.T) {
 		name     string
 		err      error
 		category string
+		code     string
 	}{
-		{"model_unavailable", fmt.Errorf("private credential detail: %w", chain.ErrHAIntentUnavailable), "intent_unavailable"},
-		{"deadline", fmt.Errorf("private credential detail: %w", context.DeadlineExceeded), "deadline_exceeded"},
-		{"unexpected", errors.New("private credential detail"), "unknown"},
+		{"model_unavailable", fmt.Errorf("private credential detail: %w", chain.ErrHAIntentUnavailable), "intent_unavailable", "intent_unavailable"},
+		{"deadline", fmt.Errorf("private credential detail: %w", context.DeadlineExceeded), "inference_timeout", "inference_timeout"},
+		{"unexpected", errors.New("private credential detail"), "unknown", "control_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, ts := consoleChatFixture(t, chain.NewFuncStep("unused", func(context.Context, *chain.ChainState) error { return nil }))
@@ -145,11 +153,11 @@ func TestControlDispatchLogsOnlyBoundedErrorClass(t *testing.T) {
 				t.Fatal(err)
 			}
 			var event serverMessage
-			if err := conn.ReadJSON(&event); err != nil {
+			if err := readChatMessage(conn, &event); err != nil {
 				t.Fatal(err)
 			}
 			event = serverMessage{}
-			if err := conn.ReadJSON(&event); err != nil || event.Type != "error" || event.Code != "control_unavailable" || ha.writes.Load() != 0 {
+			if err := readChatMessage(conn, &event); err != nil || event.Type != "error" || event.Code != tc.code || ha.writes.Load() != 0 {
 				t.Fatalf("changed dispatch failure: %+v %v", event, err)
 			}
 			entries := logs.FilterMessage("console device request failed").All()

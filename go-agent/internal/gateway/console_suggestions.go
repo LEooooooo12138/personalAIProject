@@ -2,12 +2,16 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/yuanleyao/ai-agent/internal/console"
@@ -20,38 +24,76 @@ type consoleSuggestionRule struct {
 	Actions    []smarthome.AutomationAction    `json:"actions"`
 }
 type consoleSuggestionEvidence struct {
-	SampleSize *int `json:"sample_size"`
-	PeriodDays *int `json:"period_days"`
+	SampleSize       *int                            `json:"sample_size"`
+	PeriodDays       *int                            `json:"period_days"`
+	HitDays          *int                            `json:"hit_days,omitempty"`
+	EligibleDays     *int                            `json:"eligible_days,omitempty"`
+	Denominator      *int                            `json:"denominator,omitempty"`
+	DenominatorType  string                          `json:"denominator_type,omitempty"`
+	Window           *smarthome.TimeWindow           `json:"window,omitempty"`
+	AlgorithmVersion string                          `json:"algorithm_version,omitempty"`
+	ExcludedCounts   map[string]int                  `json:"excluded_counts,omitempty"`
+	EventRefs        []smarthome.LocalEventReference `json:"event_refs,omitempty"`
+	EvidenceCount    int                             `json:"evidence_count,omitempty"`
+}
+type consoleSuggestionEntity struct {
+	EntityID    string  `json:"entity_id"`
+	Name        string  `json:"name"`
+	Domain      string  `json:"domain"`
+	DeviceClass *string `json:"device_class"`
+	AreaName    string  `json:"area_name"`
+	DeviceName  string  `json:"device_name"`
 }
 type consoleSuggestionView struct {
-	ID                 string                    `json:"id"`
-	Status             string                    `json:"status"`
-	CreatedAt          time.Time                 `json:"created_at"`
-	Title              string                    `json:"title"`
-	Confidence         float64                   `json:"confidence"`
-	TimeZone           string                    `json:"time_zone"`
-	EntityIDs          []string                  `json:"entity_ids"`
-	Rule               *consoleSuggestionRule    `json:"rule"`
-	MissingBindings    []string                  `json:"missing_bindings"`
-	UnsupportedCode    *string                   `json:"unsupported_code"`
-	Shared             bool                      `json:"shared"`
-	CanBind            bool                      `json:"can_bind"`
-	CanConfirm         bool                      `json:"can_confirm"`
-	CanIgnore          bool                      `json:"can_ignore"`
-	SourceSuggestionID string                    `json:"source_suggestion_id,omitempty"`
-	SupersededBy       string                    `json:"superseded_by,omitempty"`
-	Evidence           consoleSuggestionEvidence `json:"evidence"`
+	Installation       *consoleInstallOperationView         `json:"installation,omitempty"`
+	InstallationState  string                               `json:"installation_state,omitempty"`
+	CurrentVersion     string                               `json:"current_version,omitempty"`
+	CanRevise          bool                                 `json:"can_revise"`
+	Intent             *smarthome.SuggestionIntent          `json:"intent,omitempty"`
+	PresenceBinding    *smarthome.PresenceBinding           `json:"presence_binding,omitempty"`
+	RevisionDiff       []smarthome.SuggestionRevisionChange `json:"revision_diff,omitempty"`
+	ID                 string                               `json:"id"`
+	Status             string                               `json:"status"`
+	CreatedAt          time.Time                            `json:"created_at"`
+	Title              string                               `json:"title"`
+	Confidence         float64                              `json:"confidence"`
+	TimeZone           string                               `json:"time_zone"`
+	EntityIDs          []string                             `json:"entity_ids"`
+	Entities           []consoleSuggestionEntity            `json:"entities"`
+	Rule               *consoleSuggestionRule               `json:"rule"`
+	MissingBindings    []string                             `json:"missing_bindings"`
+	UnsupportedCode    *string                              `json:"unsupported_code"`
+	Shared             bool                                 `json:"shared"`
+	CanBind            bool                                 `json:"can_bind"`
+	CanConfirm         bool                                 `json:"can_confirm"`
+	CanIgnore          bool                                 `json:"can_ignore"`
+	SourceSuggestionID string                               `json:"source_suggestion_id,omitempty"`
+	SupersededBy       string                               `json:"superseded_by,omitempty"`
+	Evidence           consoleSuggestionEvidence            `json:"evidence"`
 }
 
 func (s *Server) setupConsoleSmartHomeRoutes(g *gin.RouterGroup) {
+	s.setupConsoleAutomationManagementRoutes(g)
+	g.GET("/automations", s.handleConsoleAutomations)
+	g.GET("/automations/:id/diagnostics/latest", s.handleConsoleLatestAutomationDiagnostic)
+	g.POST("/admin/automations/:id/diagnostics", s.handleConsoleDiagnoseAutomation)
+	g.POST("/admin/automation-diagnostics", s.handleConsoleDiagnoseExternalAutomation)
 	g.GET("/suggestions", s.handleConsoleSuggestions)
+	g.GET("/admin/install-operations/:id", s.handleConsoleInstallOperation)
+	g.POST("/admin/install-operations/:id/reconcile", s.handleConsoleReconcileInstallation)
 	g.POST("/admin/suggestions/:id/bindings", s.handleConsoleSuggestionBindings)
+	g.POST("/admin/suggestions/:id/revisions", s.handleConsoleSuggestionRevisions)
 	g.POST("/admin/suggestions/:id/confirm", s.handleConsoleSuggestionConfirm)
 	g.POST("/admin/suggestions/:id/ignore", s.handleConsoleSuggestionIgnore)
 	g.GET("/admin/sharing", s.handleConsoleSharing)
 	g.PUT("/admin/sharing", s.handleConsolePutSharing)
 	g.GET("/admin/collection", s.handleConsoleCollection)
 	g.POST("/admin/analyze", s.handleConsoleAnalyze)
+	g.GET("/admin/analysis-runs/:id", s.handleConsoleAnalysisRun)
+	g.POST("/admin/analysis-runs/:id/cancel", s.handleConsoleCancelAnalysis)
+	g.POST("/admin/backfills", s.handleConsoleBackfill)
+	g.GET("/admin/backfills/:id", s.handleConsoleBackfillRun)
+	g.POST("/admin/backfills/:id/cancel", s.handleConsoleCancelBackfill)
 }
 
 // Bind cancellation before slow service work. Middleware still supplies Origin,
@@ -103,6 +145,8 @@ func (s *Server) consoleSuggestionError(c *gin.Context, err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, smarthome.ErrInstallPreexisting):
+		consoleError(c, 409, "install_preexisting_unowned", "An external automation already uses this identity; revise or ignore the pending suggestion")
 	case errors.Is(err, smarthome.ErrSuggestionNotFound):
 		consoleError(c, 404, "not_found", "Suggestion not found")
 	case errors.Is(err, smarthome.ErrAnalysisBusy):
@@ -128,8 +172,9 @@ func safeSuggestionID(id string) bool {
 	}
 	return true
 }
-func suggestionProjection(item smarthome.RuleSuggestion, admin, shared bool) consoleSuggestionView {
-	out := consoleSuggestionView{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt, Title: "自动化建议", TimeZone: "", EntityIDs: []string{}, MissingBindings: []string{}, Shared: shared}
+func suggestionProjection(item smarthome.RuleSuggestion, admin, shared bool, directory map[string]consoleSuggestionEntity) consoleSuggestionView {
+	out := consoleSuggestionView{ID: item.ID, Status: item.Status, CreatedAt: item.CreatedAt, Title: "自动化建议", TimeZone: "", EntityIDs: []string{}, Entities: []consoleSuggestionEntity{}, MissingBindings: []string{}, Shared: shared}
+	target := ""
 	if !math.IsNaN(item.Confidence) && !math.IsInf(item.Confidence, 0) && item.Confidence >= 0 && item.Confidence <= 1 {
 		out.Confidence = item.Confidence
 	}
@@ -151,7 +196,7 @@ func suggestionProjection(item smarthome.RuleSuggestion, admin, shared bool) con
 				code = "missing_bindings"
 				out.MissingBindings = []string{"presence_home"}
 				out.EntityIDs = []string{item.Intent.EntityID}
-				out.Title = fmt.Sprintf("定时开启 %s（%s）", item.Intent.EntityID, item.Intent.At)
+				target = item.Intent.EntityID
 				out.CanBind = admin && item.Status == "pending"
 			}
 		}
@@ -175,15 +220,36 @@ func suggestionProjection(item smarthome.RuleSuggestion, admin, shared bool) con
 			out.EntityIDs = append(out.EntityIDs, id)
 		}
 		sort.Strings(out.EntityIDs)
-		if item.Intent != nil && item.Intent.Kind == "time" {
-			out.Title = fmt.Sprintf("定时开启 %s（%s）", item.Intent.EntityID, item.Intent.At)
-		} else if len(out.EntityIDs) > 0 {
-			out.Title = "自动化规则：" + out.EntityIDs[0]
+		if len(rule.Action) > 0 {
+			target = rule.Action[0].Target.EntityID
 		}
-		out.CanConfirm = admin && (item.Status == "pending" || item.Status == "failed" || item.Status == "applying")
+		out.CanConfirm = admin && item.Status == "pending"
+	}
+	// Publish only references belonging to this validated rule. The directory is
+	// shared within this request, never returned wholesale to a family member.
+	for _, id := range out.EntityIDs {
+		entity, ok := directory[id]
+		if !ok {
+			entity = consoleSuggestionEntity{EntityID: id, Name: "名称待核对", Domain: strings.SplitN(id, ".", 2)[0]}
+		}
+		out.Entities = append(out.Entities, entity)
+		if id == target {
+			name := suggestionEntityLabel(entity)
+			if item.Intent != nil && item.Intent.Kind == "time" {
+				out.Title = fmt.Sprintf("定时开启 %s（%s）", name, item.Intent.At)
+			} else {
+				out.Title = "自动化规则：" + name
+			}
+		}
 	}
 	out.CanIgnore = admin && item.Status == "pending"
 	if admin {
+		out.CanRevise = smarthome.CanReviseSuggestion(item)
+		if item.Intent != nil && item.Intent.SchemaVersion == 1 && (item.Intent.Kind == "time" || item.Intent.Kind == "correlation") {
+			out.Intent = item.Intent
+			out.PresenceBinding = item.PresenceBinding
+		}
+		out.RevisionDiff = item.RevisionDiff
 		if safeSuggestionID(item.SourceSuggestionID) {
 			out.SourceSuggestionID = item.SourceSuggestionID
 		}
@@ -191,11 +257,51 @@ func suggestionProjection(item smarthome.RuleSuggestion, admin, shared bool) con
 			out.SupersededBy = item.SupersededBy
 		}
 	}
-	// RuleSuggestion has no typed historical sample/period fields. Free-form
-	// DataSource is never parsed into invented numeric evidence.
+	// Only structured evidence belonging to this validated rule is published.
+	if len(item.Evidence) > 0 && len(out.EntityIDs) > 0 {
+		evidence := item.Evidence[len(item.Evidence)-1]
+		if evidence.Denominator > 0 && (evidence.DenominatorType == "requested_days" || evidence.DenominatorType == "source_transitions" || evidence.DenominatorType == "numeric_samples") {
+			out.Evidence = consoleSuggestionEvidence{SampleSize: &evidence.SampleSize, PeriodDays: &evidence.PeriodDays, HitDays: evidence.HitDays, EligibleDays: evidence.EligibleDays, Denominator: &evidence.Denominator, DenominatorType: evidence.DenominatorType, Window: &evidence.Window, AlgorithmVersion: evidence.AlgorithmVersion, EvidenceCount: len(item.Evidence), ExcludedCounts: map[string]int{}}
+			if count, known := evidence.ExcludedCounts["invalid_or_ambiguous_state"]; known && count >= 0 {
+				out.Evidence.ExcludedCounts["invalid_or_ambiguous_state"] = count
+			}
+			allowed := map[string]bool{}
+			for _, id := range out.EntityIDs {
+				allowed[id] = true
+			}
+			for _, ref := range evidence.EventRefs {
+				if allowed[ref.EntityID] {
+					out.Evidence.EventRefs = append(out.Evidence.EventRefs, ref)
+				}
+			}
+		}
+	}
 	return out
 }
-func (s *Server) consoleFreshEntities(ctx context.Context) (map[string]bool, error) {
+func suggestionEntityLabel(entity consoleSuggestionEntity) string {
+	parts := []string{}
+	for _, name := range []string{entity.AreaName, entity.DeviceName, entity.Name} {
+		if name != "" && (len(parts) == 0 || parts[len(parts)-1] != name) {
+			parts = append(parts, name)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+func suggestionCatalogName(name, id, fallback string) string {
+	name = strings.TrimSpace(name)
+	// Catalog IDs wrap registry IDs; an unnamed registry device falls back to
+	// its raw ID before reaching this projection. Recognize both forms.
+	if strings.HasPrefix(id, "d_") || strings.HasPrefix(id, "a_") {
+		if raw, err := base64.RawURLEncoding.DecodeString(id[2:]); err == nil && name == string(raw) {
+			return fallback
+		}
+	}
+	if name == "" || name == id || !utf8.ValidString(name) || utf8.RuneCountInString(name) > 256 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return fallback
+	}
+	return name
+}
+func (s *Server) consoleSuggestionDirectory(ctx context.Context) (map[string]consoleSuggestionEntity, error) {
 	snapshot, err := s.consoleCatalog(ctx)
 	if err != nil || snapshot.Meta.Freshness != "fresh" || snapshot.Meta.Connection != "connected" || snapshot.Meta.ObservedAt == nil || time.Since(*snapshot.Meta.ObservedAt) > 30*time.Second || snapshot.Meta.ObservedAt.After(time.Now().Add(time.Second)) {
 		return nil, smarthome.ErrCatalogUnavailable
@@ -204,7 +310,7 @@ func (s *Server) consoleFreshEntities(ctx context.Context) (map[string]bool, err
 	if err != nil {
 		return nil, err
 	}
-	entities := map[string]bool{}
+	entities := map[string]consoleSuggestionEntity{}
 	for _, area := range areas.Areas {
 		devices, err := snapshot.ListDevices(area.ID)
 		if err != nil {
@@ -212,9 +318,24 @@ func (s *Server) consoleFreshEntities(ctx context.Context) (map[string]bool, err
 		}
 		for _, device := range devices.Devices {
 			for _, entity := range device.Entities {
-				entities[entity.EntityID] = true
+				deviceName := ""
+				if device.Kind == "device" {
+					deviceName = suggestionCatalogName(device.Name, device.ID, "未命名设备")
+				}
+				entities[entity.EntityID] = consoleSuggestionEntity{EntityID: entity.EntityID, Name: suggestionCatalogName(entity.Name, entity.EntityID, "未命名实体"), Domain: entity.Domain, DeviceClass: entity.DeviceClass, AreaName: suggestionCatalogName(area.Name, area.ID, "未命名房间"), DeviceName: deviceName}
 			}
 		}
+	}
+	return entities, nil
+}
+func (s *Server) consoleFreshEntities(ctx context.Context) (map[string]bool, error) {
+	directory, err := s.consoleSuggestionDirectory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entities := map[string]bool{}
+	for id := range directory {
+		entities[id] = true
 	}
 	return entities, nil
 }
@@ -236,14 +357,10 @@ func (s *Server) handleConsoleSuggestions(c *gin.Context) {
 	}
 	defer stop()
 	admin := requestConsolePrincipal(c.Request).Role == "admin"
-	var entities map[string]bool
-	if !admin {
-		var err error
-		entities, err = s.consoleFreshEntities(ctx)
-		if err != nil {
-			s.consoleSmartHomeFailure(c, 503, "catalog_unavailable", "Cannot verify current household entities")
-			return
-		}
+	directory, catalogErr := s.consoleSuggestionDirectory(ctx)
+	if catalogErr != nil && !admin {
+		s.consoleSmartHomeFailure(c, 503, "catalog_unavailable", "Cannot verify current household entities")
+		return
 	}
 	items, err := s.smartHome.GetStore().GetSuggestions()
 	if err != nil {
@@ -256,17 +373,53 @@ func (s *Server) handleConsoleSuggestions(c *gin.Context) {
 		return
 	}
 	shared := map[string]bool{}
+	entities := map[string]bool{}
+	for _, id := range sharing.EntityIDs {
+		if _, ok := directory[id]; ok {
+			entities[id] = true
+		}
+	}
 	for _, id := range sharing.SuggestionIDs {
 		shared[id] = true
 	}
 	views := []consoleSuggestionView{}
 	for _, item := range items {
-		view := suggestionProjection(item, admin, shared[item.ID])
+		projected := suggestionProjection(item, admin, shared[item.ID], directory)
+		op, lookupErr := s.smartHome.GetInstallOperationForSuggestion(item.ID)
+		if lookupErr != nil && !errors.Is(lookupErr, smarthome.ErrInstallOperationNotFound) {
+			s.consoleSuggestionError(c, lookupErr)
+			return
+		}
+		if op.ManagedAutomationID != "" {
+			managed, current, versionErr := s.smartHome.GetManagedAutomationVersion(op.ManagedAutomationID)
+			if versionErr != nil {
+				s.consoleSuggestionError(c, versionErr)
+				return
+			}
+			if managed.SuggestionID != item.ID {
+				continue
+			}
+			projected = suggestionProjection(current, admin, shared[item.ID], directory)
+			projected.ID, projected.CurrentVersion = item.ID, current.ID
+		}
+		view, err := s.consoleSuggestionInstallation(item, projected, admin)
+		if err != nil {
+			s.consoleSuggestionError(c, err)
+			return
+		}
 		if admin || visibleSuggestion(view, entities) {
 			views = append(views, view)
 		}
 	}
-	s.consoleSmartHomeJSON(c, ctx, gin.H{"suggestions": views, "count": len(views)})
+	results, err := s.consoleSharedResults(items, admin, shared, directory)
+	if err != nil {
+		s.consoleSuggestionError(c, err)
+		return
+	}
+	s.consoleAutomationJSON(c, ctx, sharing.Revision, gin.H{"suggestions": views, "count": len(views), "shared_results": results})
+}
+func (s *Server) handleConsoleSuggestionRevisions(c *gin.Context) {
+	s.consoleSuggestionMutation(c, "revise")
 }
 func (s *Server) handleConsoleSuggestionBindings(c *gin.Context) {
 	s.consoleSuggestionMutation(c, "bind")
@@ -291,6 +444,12 @@ func (s *Server) consoleSuggestionMutation(c *gin.Context, operation string) {
 	var item *smarthome.RuleSuggestion
 	var err error
 	switch operation {
+	case "revise":
+		var body smarthome.SuggestionRevisionRequest
+		if !decodeConsoleJSON(c, &body) {
+			return
+		}
+		item, err = s.smartHome.ReviseSuggestion(ctx, id, body)
 	case "bind":
 		var body smarthome.SuggestionBindings
 		if !decodeConsoleJSON(c, &body) {
@@ -325,7 +484,19 @@ func (s *Server) consoleSuggestionMutation(c *gin.Context, operation string) {
 	for _, sharedID := range sharing.SuggestionIDs {
 		shared = shared || sharedID == item.ID
 	}
-	s.consoleSmartHomeJSON(c, ctx, gin.H{"suggestion": suggestionProjection(*item, true, shared)})
+	// A completed admin operation still returns its state when HA is offline;
+	// display names then explicitly remain unverified rather than using IDs.
+	directory, _ := s.consoleSuggestionDirectory(ctx)
+	view, err := s.consoleSuggestionInstallation(*item, suggestionProjection(*item, true, shared, directory), true)
+	if err != nil {
+		s.consoleSuggestionError(c, err)
+		return
+	}
+	response := gin.H{"suggestion": view}
+	if operation == "revise" {
+		response["diff"] = item.RevisionDiff
+	}
+	s.consoleSmartHomeJSON(c, ctx, response)
 }
 
 func (s *Server) consoleSmartHomeSessionValid(c *gin.Context) bool {

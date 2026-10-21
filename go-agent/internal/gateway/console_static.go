@@ -37,7 +37,7 @@ func registerConsoleStaticRoutes(r *gin.Engine, root, publicOrigin string) {
 			csp += " ws://" + u.Host
 		}
 	}
-	csp += "; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
+	csp += "; media-src blob:; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
 	handle := func(c *gin.Context) {
 		c.Header("Content-Security-Policy", csp)
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -56,7 +56,7 @@ func registerConsoleStaticRoutes(r *gin.Engine, root, publicOrigin string) {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		page := rel == "" || rel == "chat" || rel == "account" || rel == "members" || rel == "knowledge" || rel == "automations" || rel == "admin/knowledge" || rel == "admin/collection" || consoleFamilyPage(rel)
+		page := rel == "" || rel == "chat" || rel == "account" || rel == "members" || rel == "knowledge" || rel == "automations" || rel == "admin/knowledge" || rel == "admin/collection" || rel == "admin/assistant" || consoleFamilyPage(rel)
 		if strings.HasPrefix(rel, "areas") && c.Request.URL.RawPath != "" {
 			c.Status(http.StatusNotFound)
 			return

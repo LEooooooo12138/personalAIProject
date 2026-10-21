@@ -150,7 +150,24 @@ func (s *Server) handleControlGet(c *gin.Context) {
 	defer stop()
 	_, p, ok := s.ownedControlActor(c, ctx)
 	if ok {
-		s.consoleSmartHomeJSON(c, ctx, p)
+		// An executing proposal must remain observable while Confirm owns the
+		// conversation turn. These states only read an existing event; they never
+		// append a message or run presentation inference.
+		if p.Status == "pending" || p.Status == "executing" {
+			s.publishProposal(c, ctx, p, false)
+			return
+		}
+		release, acquired := s.acquireControlTurn(c, ctx, p.SessionID)
+		if !acquired {
+			return
+		}
+		defer release()
+		p, err := s.control.Get(ctx, smarthome.ControlActor{UserID: requestConsolePrincipal(c.Request).UserID, SessionID: p.SessionID}, p.ID)
+		if err != nil {
+			s.controlError(c, err)
+			return
+		}
+		s.publishProposal(c, ctx, p, true)
 	}
 }
 func (s *Server) handleControlPropose(c *gin.Context) {
@@ -177,6 +194,11 @@ func (s *Server) handleControlPropose(c *gin.Context) {
 		consoleError(c, 404, "not_found", "未找到会话")
 		return
 	}
+	release, acquired := s.acquireControlTurn(c, ctx, actor.SessionID)
+	if !acquired {
+		return
+	}
+	defer release()
 	outcome, err := s.control.Propose(ctx, actor, b.RequestID, smarthome.ControlIntent{Kind: "on_off", EntityID: b.EntityID, Action: b.Action})
 	if err != nil {
 		s.controlError(c, err)
@@ -201,6 +223,11 @@ func (s *Server) controlMutation(c *gin.Context, operation string) {
 	if !ok {
 		return
 	}
+	release, acquired := s.acquireControlTurn(c, ctx, actor.SessionID)
+	if !acquired {
+		return
+	}
+	defer release()
 	var p *smarthome.ControlProposal
 	var err error
 	switch operation {
@@ -215,5 +242,5 @@ func (s *Server) controlMutation(c *gin.Context, operation string) {
 		s.controlError(c, err)
 		return
 	}
-	s.consoleSmartHomeJSON(c, ctx, p)
+	s.publishProposal(c, ctx, p, true)
 }

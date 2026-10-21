@@ -89,7 +89,7 @@ func TestFamilyChatExcludesHAArchiveFromActualModelContext(t *testing.T) {
 	}
 	for {
 		var message serverMessage
-		if err := conn.ReadJSON(&message); err != nil {
+		if err := readChatMessage(conn, &message); err != nil {
 			t.Fatal(err)
 		}
 		if message.Type == "error" {
@@ -105,19 +105,36 @@ func TestFamilyChatExcludesHAArchiveFromActualModelContext(t *testing.T) {
 	if err := json.Unmarshal([]byte(<-requests), &request); err != nil {
 		t.Fatal(err)
 	}
-	var text string
-	for _, m := range request.Messages {
-		if m.Role == "system" {
-			text += m.Content
+	var knowledgeContext string
+	referenceCount := 0
+	for i, m := range request.Messages {
+		// Privacy applies to every outbound message, regardless of role or format.
+		for _, secret := range []string{"HA_ARCHIVE_SECRET_82741", "INTERNAL_SECRET_82741", "OTHER_VAULT_SECRET_82741"} {
+			if strings.Contains(m.Content, secret) {
+				t.Errorf("private unique fact %s reached actual outbound message %d (%s)", secret, i, m.Role)
+			}
 		}
-	}
-	if !strings.Contains(text, "PUBLIC_FACT_82741") {
-		t.Fatalf("public unique fact missing from actual model context: %s", text)
-	}
-	for _, secret := range []string{"HA_ARCHIVE_SECRET_82741", "INTERNAL_SECRET_82741", "OTHER_VAULT_SECRET_82741"} {
-		if strings.Contains(text, secret) {
-			t.Errorf("private unique fact %s reached actual model context: %s", secret, text)
+		if m.Role == "system" && strings.Contains(m.Content, "PUBLIC_FACT_82741") {
+			t.Error("raw retrieved knowledge reached system instructions")
 		}
+		if m.Role != "user" {
+			continue
+		}
+		var reference struct {
+			ContextType      string `json:"context_type"`
+			KnowledgeContext string `json:"knowledge_context"`
+		}
+		if err := json.Unmarshal([]byte(m.Content), &reference); err != nil || reference.ContextType != "assistant_reference" {
+			continue
+		}
+		referenceCount++
+		knowledgeContext = reference.KnowledgeContext
+	}
+	if referenceCount != 1 {
+		t.Fatalf("want one user reference message, got %d", referenceCount)
+	}
+	if !strings.Contains(knowledgeContext, "PUBLIC_FACT_82741") {
+		t.Fatalf("public unique fact missing from reference knowledge_context: %s", knowledgeContext)
 	}
 	t.Log("Actual authenticated ordinary chat model context includes PUBLIC_FACT_82741 and excludes archive/internal/other-vault unique facts")
 }

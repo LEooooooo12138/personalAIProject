@@ -1,0 +1,73 @@
+{
+  "updated_at": "2026-10-09T00:00:00Z",
+  "suggestions": [
+    {
+      "id": "legacy_no_evidence",
+      "title": "LEGACY_RAW_SECRET_PENDING",
+      "description": "LEGACY_RAW_SECRET_DESCRIPTION",
+      "data_source": "LEGACY_RAW_SECRET_NO_STRUCTURED_EVIDENCE",
+      "confidence": 0.8,
+      "created_at": "2026-10-09T00:00:00Z",
+      "status": "pending",
+      "intent": {
+        "schema_version": 1,
+        "kind": "time",
+        "entity_id": "light.room",
+        "at": "18:00",
+        "time_zone": "UTC",
+        "required_conditions": ["presence_home"]
+      },
+      "missing_bindings": ["presence_home"]
+    },
+    {
+      "id": "legacy_confirmed",
+      "title": "LEGACY_RAW_SECRET_CONFIRMED",
+      "confidence": 0.8,
+      "created_at": "2026-10-09T00:00:00Z",
+      "status": "confirmed",
+      "ha_automation_id": "automation.old_assumed_mapping",
+      "intent": {
+        "schema_version": 1,
+        "kind": "time",
+        "entity_id": "light.room",
+        "at": "18:00",
+        "time_zone": "UTC",
+        "required_conditions": ["presence_home"]
+      },
+      "presence_binding": {"entity_id": "binary_sensor.house", "state": "on"}
+    },
+    {
+      "id": "legacy_applying",
+      "title": "LEGACY_RAW_SECRET_APPLYING",
+      "confidence": 0.8,
+      "created_at": "2026-10-09T00:00:00Z",
+      "status": "applying",
+      "intent": {
+        "schema_version": 1,
+        "kind": "time",
+        "entity_id": "light.room",
+        "at": "18:00",
+        "time_zone": "UTC",
+        "required_conditions": ["presence_home"]
+      },
+      "presence_binding": {"entity_id": "binary_sensor.house", "state": "on"}
+    },
+    {
+      "id": "legacy_failed",
+      "title": "LEGACY_RAW_SECRET_FAILED",
+      "last_error": "LEGACY_RAW_SECRET_PROVIDER_ERROR",
+      "confidence": 0.8,
+      "created_at": "2026-10-09T00:00:00Z",
+      "status": "failed",
+      "intent": {
+        "schema_version": 1,
+        "kind": "time",
+        "entity_id": "light.room",
+        "at": "18:00",
+        "time_zone": "UTC",
+        "required_conditions": ["presence_home"]
+      },
+      "presence_binding": {"entity_id": "binary_sensor.house", "state": "on"}
+    }
+  ]
+}

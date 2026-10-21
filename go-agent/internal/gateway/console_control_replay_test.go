@@ -30,17 +30,17 @@ func TestControlReconnectReplayBeforeSessionRollover(t *testing.T) {
 	conn := dialConsole(t, ts, admin)
 	conn.WriteJSON(clientMessage{RequestID: "same-request", Content: "打开台灯"})
 	var event serverMessage
-	conn.ReadJSON(&event)
+	readChatMessage(conn, &event)
 	sid := event.SessionID
-	if err = conn.ReadJSON(&event); err != nil || event.Proposal == nil {
+	if err = readChatMessage(conn, &event); err != nil || event.Proposal == nil {
 		t.Fatalf("first proposal %v %v", event, err)
 	}
 	id := event.Proposal.ID
 	conn.Close()
 	retry := dialConsole(t, ts, admin)
 	retry.WriteJSON(clientMessage{SessionID: sid, RequestID: "same-request", Content: "打开台灯"})
-	retry.ReadJSON(&event)
-	if err = retry.ReadJSON(&event); err != nil || event.Type != "control_proposal" || event.Proposal == nil || event.Proposal.ID != id || event.SessionID != sid {
+	readChatMessage(retry, &event)
+	if err = readChatMessage(retry, &event); err != nil || event.Type != "control_proposal" || event.Proposal == nil || event.Proposal.ID != id || event.SessionID != sid {
 		t.Fatalf("replay moved session or proposal: %+v err %v", event, err)
 	}
 	p, _ := s.consoleStore.Resolve(admin.Value)
@@ -64,16 +64,16 @@ func TestControlReplayRejectsChangedContent(t *testing.T) {
 	conn := dialConsole(t, ts, admin)
 	conn.WriteJSON(clientMessage{RequestID: "same-request", Content: "打开台灯"})
 	var event serverMessage
-	conn.ReadJSON(&event)
+	readChatMessage(conn, &event)
 	sid := event.SessionID
-	conn.ReadJSON(&event)
+	readChatMessage(conn, &event)
 	conn.Close()
 	retry := dialConsole(t, ts, admin)
 	retry.WriteJSON(clientMessage{SessionID: sid, RequestID: "same-request", Content: "关闭台灯"})
 	event = serverMessage{}
-	retry.ReadJSON(&event)
+	readChatMessage(retry, &event)
 	event = serverMessage{}
-	if err = retry.ReadJSON(&event); err != nil || event.Type != "error" || event.Code != "control_conflict" {
+	if err = readChatMessage(retry, &event); err != nil || event.Type != "error" || event.Code != "request_entry_conflict" {
 		t.Fatalf("changed input replay accepted: %+v err %v", event, err)
 	}
 	if ha.writes != 0 {

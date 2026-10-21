@@ -132,3 +132,32 @@ func TestConsoleTemporaryPasswordLogoutAndResetRevocation(t *testing.T) {
 	consoleJSON(t, consoleRequest(s, "GET", consolePrefix+"/auth/me", "", second, "", "", ""), 401)
 	consoleJSON(t, consoleRequest(s, "GET", consolePrefix+"/auth/me", "", admin, "", "", ""), 200)
 }
+
+func TestConsoleExpectedIdentityDoesNotLeakPrecondition(t *testing.T) {
+	s := consoleTestServer(t, testConsoleOrigin)
+	consoleBootstrap(t, s)
+	cookie, _, _ := consoleLogin(t, s, "owner", testConsolePassword, testConsoleOrigin)
+	for _, user := range []string{"", "private-user-marker"} {
+		r := httptest.NewRequest("GET", consolePrefix+"/sessions", nil)
+		r.AddCookie(cookie)
+		r.Header.Set("X-Console-Expected-User", user)
+		r.Header.Set("X-CSRF-Token", "private-csrf-marker")
+		w := httptest.NewRecorder()
+		s.engine.ServeHTTP(w, r)
+		consoleJSON(t, w, 401)
+		if !strings.Contains(w.Body.String(), `"code":"identity_changed"`) {
+			t.Fatalf("response=%s", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "private-") || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("identity precondition leaked or was cacheable")
+		}
+	}
+	// An identity discovery read must be able to discover the current Cookie.
+	r := httptest.NewRequest("GET", consolePrefix+"/auth/me", nil)
+	r.AddCookie(cookie)
+	r.Header.Set("X-Console-Expected-User", "previous-user")
+	r.Header.Set("X-CSRF-Token", "previous-csrf")
+	w := httptest.NewRecorder()
+	s.engine.ServeHTTP(w, r)
+	consoleJSON(t, w, 200)
+}

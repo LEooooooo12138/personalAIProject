@@ -56,6 +56,19 @@ func (s *Server) consoleMiddleware() gin.HandlerFunc {
 			consoleStoreError(c, err)
 			return
 		}
+		// Optional v2 precondition binds reads as well as writes to the identity
+		// checked by the page before the browser attaches the current Cookie.
+		if _, present := c.Request.Header[http.CanonicalHeaderKey("X-Console-Expected-User")]; present && path != consolePrefix+"/auth/me" {
+			expected, csrfErr := s.consoleStore.CSRFToken(token)
+			if csrfErr != nil {
+				consoleStoreError(c, csrfErr)
+				return
+			}
+			if c.GetHeader("X-Console-Expected-User") != p.UserID || subtle.ConstantTimeCompare([]byte(c.GetHeader("X-CSRF-Token")), []byte(expected)) != 1 {
+				consoleError(c, 401, "identity_changed", "Authentication identity changed")
+				return
+			}
+		}
 		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), consolePrincipalKey{}, p))
 		allowedRestricted := (path == consolePrefix+"/auth/me" && c.Request.Method == http.MethodGet) || (c.Request.Method == http.MethodPost && (path == consolePrefix+"/auth/password" || path == consolePrefix+"/auth/logout"))
 		if p.MustChangePassword && !allowedRestricted {

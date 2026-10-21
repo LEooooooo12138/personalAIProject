@@ -43,7 +43,9 @@ func (s *Server) handleConsoleChat(c *gin.Context) {
 	defer conn.Close()
 	go func() { <-ctx.Done(); conn.Close() }()
 	options := webChatOptions{ChannelID: "console", VaultName: "agent", IndexMessages: false,
-		ControlChat: s.controlChat,
+		AssistantConfig: s.assistantConfig,
+		Presenter:       s.presenter,
+		ControlChat:     s.controlChat,
 		AuthorizeControl: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -102,6 +104,9 @@ func (s *Server) consoleCapabilities(role string, restricted bool) []string {
 	}
 	if role == "admin" {
 		capabilities = append(capabilities, "members:manage")
+		if s.assistantConfig != nil {
+			capabilities = append(capabilities, "providers:manage", "personality:manage")
+		}
 	}
 	if s.consoleChatAvailable() {
 		capabilities = append(capabilities, "chat:use")

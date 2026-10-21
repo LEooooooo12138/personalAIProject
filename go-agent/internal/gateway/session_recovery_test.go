@@ -20,7 +20,7 @@ func TestBrowserSessionErrorsAreRecoverableAndTyped(t *testing.T) {
 	conn := dialBrowser(t, ts, owner)
 	conn.WriteJSON(clientMessage{SessionID: "expired-sid", Content: "hello"})
 	var response map[string]interface{}
-	if err := conn.ReadJSON(&response); err != nil {
+	if err := readChatMessage(conn, &response); err != nil {
 		t.Fatal(err)
 	}
 	if response["code"] != "session_not_found" || response["session_id"] != "expired-sid" {
@@ -28,10 +28,10 @@ func TestBrowserSessionErrorsAreRecoverableAndTyped(t *testing.T) {
 	}
 	conn.WriteJSON(clientMessage{Content: "fresh question"})
 	var identity, answer serverMessage
-	if err := conn.ReadJSON(&identity); err != nil {
+	if err := readChatMessage(conn, &identity); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.ReadJSON(&answer); err != nil {
+	if err := readChatMessage(conn, &answer); err != nil {
 		t.Fatal(err)
 	}
 	if identity.Type != "session" || answer.Type != "response" {
@@ -45,7 +45,7 @@ func TestBrowserSessionErrorsAreRecoverableAndTyped(t *testing.T) {
 	full := dialBrowser(t, ts, owner)
 	full.WriteJSON(clientMessage{Content: "full"})
 	response = nil
-	if err := full.ReadJSON(&response); err != nil {
+	if err := readChatMessage(full, &response); err != nil {
 		t.Fatal(err)
 	}
 	if response["code"] != "session_unavailable" {
@@ -59,10 +59,10 @@ func TestExpiredConnectedSessionCanStartAgain(t *testing.T) {
 	conn := dialBrowser(t, ts, cookie)
 	conn.WriteJSON(clientMessage{Content: "first"})
 	var identity, answer serverMessage
-	if err := conn.ReadJSON(&identity); err != nil {
+	if err := readChatMessage(conn, &identity); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.ReadJSON(&answer); err != nil {
+	if err := readChatMessage(conn, &answer); err != nil {
 		t.Fatal(err)
 	}
 	owner := strings.Split(cookie.Value, ".")[0]
@@ -73,20 +73,20 @@ func TestExpiredConnectedSessionCanStartAgain(t *testing.T) {
 	s.sessionMgr.EndSession(session)
 	conn.WriteJSON(clientMessage{SessionID: identity.SessionID, Content: "expired"})
 	var failed map[string]interface{}
-	if err := conn.ReadJSON(&failed); err != nil {
+	if err := readChatMessage(conn, &failed); err != nil {
 		t.Fatal(err)
 	}
 	if failed["code"] != "session_not_found" {
 		t.Fatalf("wrong expiry response: %#v", failed)
 	}
 	conn.WriteJSON(clientMessage{Content: "new conversation"})
-	if err := conn.ReadJSON(&identity); err != nil {
+	if err := readChatMessage(conn, &identity); err != nil {
 		t.Fatal(err)
 	}
 	if identity.Type != "session" {
 		t.Fatalf("socket stayed bound to expired SID: %+v", identity)
 	}
-	if err := conn.ReadJSON(&answer); err != nil {
+	if err := readChatMessage(conn, &answer); err != nil {
 		t.Fatal(err)
 	}
 	if answer.Type != "response" {
@@ -132,7 +132,7 @@ func TestSessionStorageFailuresDoNotExpireBrowserIdentity(t *testing.T) {
 			conn := dialBrowser(t, ts, cookie)
 			conn.WriteJSON(clientMessage{SessionID: "persisted", Content: "retry"})
 			var response serverMessage
-			if err := conn.ReadJSON(&response); err != nil {
+			if err := readChatMessage(conn, &response); err != nil {
 				t.Fatal(err)
 			}
 			if response.Code != "session_unavailable" || response.SessionID != "persisted" {
@@ -158,13 +158,13 @@ func TestSessionStorageFailuresDoNotExpireBrowserIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			conn.WriteJSON(clientMessage{SessionID: "persisted", Content: "retry after recovery"})
-			if err := conn.ReadJSON(&response); err != nil {
+			if err := readChatMessage(conn, &response); err != nil {
 				t.Fatal(err)
 			}
 			if response.Type != "session" || response.SessionID != "persisted" {
 				t.Fatalf("known session was lost: %+v", response)
 			}
-			if err := conn.ReadJSON(&response); err != nil {
+			if err := readChatMessage(conn, &response); err != nil {
 				t.Fatal(err)
 			}
 			if response.Type != "response" {

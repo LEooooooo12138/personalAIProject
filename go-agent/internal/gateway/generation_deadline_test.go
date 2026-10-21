@@ -71,6 +71,8 @@ func TestGenerationDeadlineTerminalFrame(t *testing.T) {
 					if err := conn.ReadJSON(&input); err != nil {
 						return
 					}
+					// Match loop: each incoming message supplies its own request identity.
+					w.requestID = input.RequestID
 					if i == 0 {
 						generation, stop := context.WithTimeout(ctx, 40*time.Millisecond)
 						w.handleChatContext(generation, input.Content)
@@ -94,7 +96,7 @@ func TestGenerationDeadlineTerminalFrame(t *testing.T) {
 				t.Fatal(err)
 			}
 			var output serverMessage
-			if err := conn.ReadJSON(&output); err != nil || output.Type != "error" || output.Message == "" || output.Code == "session_not_found" || strings.Contains(output.Message, "private") {
+			if err := readChatMessage(conn, &output); err != nil || output.Type != "error" || output.Message == "" || output.Code == "session_not_found" || strings.Contains(output.Message, "private") {
 				t.Fatalf("deadline must terminate with a safe error frame: %+v, %v", output, err)
 			}
 			messages, err := s.sessionStore.OwnedMessages(channel, sid, owner)
@@ -112,7 +114,7 @@ func TestGenerationDeadlineTerminalFrame(t *testing.T) {
 				t.Fatal(err)
 			}
 			output = serverMessage{}
-			if err := conn.ReadJSON(&output); err != nil || output.Type != "response" || output.Content != "answer second" {
+			if err := readChatMessage(conn, &output); err != nil || output.Type != "response" || output.Content != "answer second" {
 				t.Fatalf("same socket did not recover: %+v, %v", output, err)
 			}
 			<-finished

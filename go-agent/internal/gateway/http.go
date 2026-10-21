@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/yuanleyao/ai-agent/internal/assistantconfig"
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
 	"github.com/yuanleyao/ai-agent/internal/console"
@@ -22,11 +23,14 @@ import (
 	"github.com/yuanleyao/ai-agent/internal/filter"
 	"github.com/yuanleyao/ai-agent/internal/inference"
 	"github.com/yuanleyao/ai-agent/internal/memory"
+	"github.com/yuanleyao/ai-agent/internal/persona"
 	"github.com/yuanleyao/ai-agent/internal/smarthome"
+	"github.com/yuanleyao/ai-agent/internal/speech"
 	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 type Server struct {
+	presenter   *persona.Presenter
 	control     *smarthome.ControlService
 	controlChat *core.ControlChat
 	sessionMgr  *core.SessionManager
@@ -51,6 +55,9 @@ type Server struct {
 	sedimenter          *memory.Sedimenter
 	smartHome           *smarthome.Manager
 	consoleStore        *console.Store
+	assistantConfig     *assistantconfig.Store
+	speechJobs          *speech.Jobs
+	assistantMu         sync.Mutex // serialize provider snapshots/start with config replacement
 	consoleConfigErr    error
 	consoleLoginLimiter *consoleLoginLimiter
 	consoleMemberMu     sync.Mutex
@@ -63,6 +70,7 @@ func NewServer(cfg *core.Config, logger *zap.Logger, infer inference.Client, vr 
 		embedStore = vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger)
 	}
 	s := &Server{
+		presenter:   persona.NewPresenter(infer, cfg.Inference.Models.Local),
 		sessionMgr:  sessionMgr,
 		embedStore:  vault.NewEmbeddingStore(infer, vr, cfg.Vaults.Personal, logger),
 		cfg:         cfg,
@@ -93,24 +101,27 @@ func NewServerWithChains(cfg *core.Config, logger *zap.Logger, infer inference.C
 func NewServerFromApp(app *core.App) *Server {
 	embedStore := app.EmbedStore
 	s := &Server{
-		sessionMgr:    app.SessionMgr,
-		embedStore:    app.EmbedStore,
-		cfg:           app.Config,
-		logger:        app.Logger,
-		infer:         app.Infer,
-		vaultR:        app.VaultR,
-		vaultW:        app.VaultW,
-		chMgr:         app.ChMgr,
-		router:        app.ModelRouter,
-		filterChain:   app.FilterChain,
-		chainExecutor: app.ChainExecutor,
-		chainRouter:   app.ChainRouter,
-		sessionStore:  app.SessionStore,
-		sedimenter:    app.Sedimenter,
-		smartHome:     app.SmartHome,
-		consoleStore:  app.ConsoleStore,
-		control:       app.Control,
-		controlChat:   app.ControlChat,
+		presenter:       persona.NewPresenter(app.Infer, app.Config.Inference.Models.Local),
+		sessionMgr:      app.SessionMgr,
+		embedStore:      app.EmbedStore,
+		cfg:             app.Config,
+		logger:          app.Logger,
+		infer:           app.Infer,
+		vaultR:          app.VaultR,
+		vaultW:          app.VaultW,
+		chMgr:           app.ChMgr,
+		router:          app.ModelRouter,
+		filterChain:     app.FilterChain,
+		chainExecutor:   app.ChainExecutor,
+		chainRouter:     app.ChainRouter,
+		sessionStore:    app.SessionStore,
+		sedimenter:      app.Sedimenter,
+		smartHome:       app.SmartHome,
+		consoleStore:    app.ConsoleStore,
+		assistantConfig: app.AssistantConfig,
+		speechJobs:      speech.NewJobs(),
+		control:         app.Control,
+		controlChat:     app.ControlChat,
 	}
 	_ = embedStore
 	s.setupRoutes()
@@ -118,6 +129,9 @@ func NewServerFromApp(app *core.App) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s.speechJobs != nil {
+		defer s.speechJobs.CancelAll()
+	}
 	if s.ollamaStatus != nil {
 		defer s.ollamaStatus.Close()
 	}

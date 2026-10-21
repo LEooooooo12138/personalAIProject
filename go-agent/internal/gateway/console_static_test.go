@@ -43,6 +43,26 @@ func staticRequest(r http.Handler, method, path string) *httptest.ResponseRecord
 	return w
 }
 
+func TestConsoleStaticCSPAllowsOnlyBlobMedia(t *testing.T) {
+	r, _ := staticTestRouter(t, true)
+	w := staticRequest(r, "GET", "/app/chat")
+	policy := map[string]string{}
+	for _, directive := range strings.Split(w.Header().Get("Content-Security-Policy"), ";") {
+		parts := strings.Fields(directive)
+		if len(parts) > 0 {
+			policy[parts[0]] = strings.Join(parts[1:], " ")
+		}
+	}
+	if policy["media-src"] != "blob:" {
+		t.Fatalf("generated audio must play without allowing remote or data media: %q", policy["media-src"])
+	}
+	for key, want := range map[string]string{"default-src": "'none'", "script-src": "'self'", "worker-src": "'self'", "object-src": "'none'", "connect-src": "'self' wss://family.example:8443"} {
+		if policy[key] != want {
+			t.Errorf("%s=%q, want %q", key, policy[key], want)
+		}
+	}
+}
+
 func TestConsoleStaticKnownPagesAndAssets(t *testing.T) {
 	r, _ := staticTestRouter(t, true)
 	redirect := staticRequest(r, "GET", "/app")

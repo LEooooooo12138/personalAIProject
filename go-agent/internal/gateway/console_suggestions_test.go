@@ -28,7 +28,7 @@ func suggestionsFixture(t *testing.T) (*Server, *atomic.Int32) {
 func suggestionsFixtureWithArchive(t *testing.T) (*Server, *atomic.Int32, string) {
 	t.Helper()
 	writes := &atomic.Int32{}
-	ha := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ha := httptest.NewServer(gatewayInstallationProofHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/config":
@@ -157,7 +157,7 @@ func TestConsoleSuggestionSharedMemberProjectionChecksEveryEntity(t *testing.T) 
 	unknown := smarthome.RuleSuggestion{ID: "legacy", Status: "confirmed", Title: "RAW_LEGACY_SECRET"}
 	seedSuggestions(t, s, []smarthome.RuleSuggestion{good, missing, hidden, unknown})
 	sharing, _ := s.consoleStore.GetSharing()
-	if _, err := s.consoleStore.PutSharing(sharing.Revision, []string{"legacy.entity"}, []string{"shared", "missing-condition", "legacy"}); err != nil {
+	if _, err := s.consoleStore.PutSharing(sharing.Revision, []string{"legacy.entity", "light.room", "binary_sensor.house"}, []string{"shared", "missing-condition", "legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	_, member := consoleMemberLogin(t, s, "Member")

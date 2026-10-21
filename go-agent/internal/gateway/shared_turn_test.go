@@ -44,11 +44,11 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 			first := dialBrowser(t, ts, cookie)
 			first.WriteJSON(clientMessage{Content: "seed"})
 			var identity, response serverMessage
-			if err := first.ReadJSON(&identity); err != nil {
+			if err := readChatMessage(first, &identity); err != nil {
 				t.Fatal(err)
 			}
 			sid := identity.SessionID
-			if err := first.ReadJSON(&response); err != nil {
+			if err := readChatMessage(first, &response); err != nil {
 				t.Fatal(err)
 			}
 			first.WriteJSON(clientMessage{Content: "A"})
@@ -59,7 +59,7 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 			}
 			second := dialBrowser(t, ts, cookie)
 			second.WriteJSON(clientMessage{SessionID: sid, Content: "B"})
-			if err := second.ReadJSON(&identity); err != nil {
+			if err := readChatMessage(second, &identity); err != nil {
 				t.Fatal(err)
 			}
 			if identity.Type != "session" {
@@ -67,10 +67,10 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 			}
 			other := dialBrowser(t, ts, cookie)
 			other.WriteJSON(clientMessage{Content: "C"})
-			if err := other.ReadJSON(&identity); err != nil {
+			if err := readChatMessage(other, &identity); err != nil {
 				t.Fatal(err)
 			}
-			if err := other.ReadJSON(&response); err != nil {
+			if err := readChatMessage(other, &response); err != nil {
 				t.Fatal(err)
 			}
 			if response.Content != "answerC" {
@@ -83,7 +83,7 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 			case <-time.After(50 * time.Millisecond):
 			}
 			unblock()
-			if err := first.ReadJSON(&response); err != nil {
+			if err := readChatMessage(first, &response); err != nil {
 				t.Fatal(err)
 			}
 			if response.Content != "answerA" {
@@ -100,7 +100,7 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("B stayed blocked")
 			}
-			if err := second.ReadJSON(&response); err != nil {
+			if err := readChatMessage(second, &response); err != nil {
 				t.Fatal(err)
 			}
 			newSID := sid
@@ -109,7 +109,7 @@ func TestSharedWebSocketSessionSerializesTurns(t *testing.T) {
 					t.Fatalf("missing round rotation: %+v", response)
 				}
 				newSID = response.SessionID
-				if err := second.ReadJSON(&response); err != nil {
+				if err := readChatMessage(second, &response); err != nil {
 					t.Fatal(err)
 				}
 			}
