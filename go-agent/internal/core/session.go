@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
+	"github.com/yuanleyao/ai-agent/internal/smarthome"
 	"go.uber.org/zap"
 )
 
@@ -33,16 +35,18 @@ const (
 // Session is a single conversation between a user and the agent on one channel.
 // 每个 Session 记录了一段完整的对话：谁、在哪个通道、聊了什么、聊了多久。
 type Session struct {
-	ID           string
-	ChannelID    string // 通道标识：internal / qclaw / webchat
-	UserID       string // 用户标识（微信 OpenID 或网页 session ID）
-	OwnerID      string // Authenticated browser identity, never supplied by message payload.
-	State        SessionState
-	Messages     []Message // 对话历史，按时间顺序排列
-	RoundCount   int       // 已对话轮数（一问一答算一轮）
-	StartedAt    time.Time // 会话开始时间
-	LastActiveAt time.Time // 最后一条消息的时间
-	CreatedAt    time.Time
+	RequestEntries map[string]RequestEntryBinding
+	ID             string
+	ChannelID      string // 通道标识：internal / qclaw / webchat
+	UserID         string // 用户标识（微信 OpenID 或网页 session ID）
+	OwnerID        string // Authenticated browser identity, never supplied by message payload.
+	AssistantMode  string // Pinned provider policy; legacy history is always local.
+	State          SessionState
+	Messages       []Message // 对话历史，按时间顺序排列
+	RoundCount     int       // 已对话轮数（一问一答算一轮）
+	StartedAt      time.Time // 会话开始时间
+	LastActiveAt   time.Time // 最后一条消息的时间
+	CreatedAt      time.Time
 
 	mu sync.RWMutex // 保护并发访问
 }
@@ -55,10 +59,34 @@ type MessageAttachment struct {
 }
 
 type Message struct {
-	Attachments []MessageAttachment `json:"attachments,omitempty"`
-	Role        string              `json:"role"`    // "user" 或 "assistant"
-	Content     string              `json:"content"` // 消息正文
-	Timestamp   time.Time           `json:"timestamp"`
+	EventID             string                       `json:"event_id,omitempty"`
+	PersonalityRevision string                       `json:"personality_revision,omitempty"`
+	PresentationVersion string                       `json:"presentation_version,omitempty"`
+	DeviceResult        *smarthome.DeviceQueryResult `json:"device_result,omitempty"`
+	AssistantMode       string                       `json:"assistant_mode,omitempty"`
+	Attachments         []MessageAttachment          `json:"attachments,omitempty"`
+	Role                string                       `json:"role"`    // "user" 或 "assistant"
+	Content             string                       `json:"content"` // 消息正文
+	Timestamp           time.Time                    `json:"timestamp"`
+}
+
+// PinAssistantMode chooses the provider policy once, before the first message.
+// Existing unclassified history must never gain permission to leave the device.
+func (s *Session) PinAssistantMode(requested string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AssistantMode == "" {
+		if len(s.Messages) != 0 {
+			requested = "local"
+		}
+		s.AssistantMode = requested
+	}
+	switch s.AssistantMode {
+	case "local", "cloud", "hybrid":
+	default:
+		s.AssistantMode = "local"
+	}
+	return s.AssistantMode
 }
 
 // ── Session Key ──
@@ -242,7 +270,7 @@ func (m *SessionManager) AddMessage(s *Session, msg Message) bool {
 		return false
 	}
 
-	msg.Attachments = append([]MessageAttachment(nil), msg.Attachments...)
+	msg = cloneMessage(msg)
 	s.Messages = append(s.Messages, msg)
 	s.LastActiveAt = time.Now()
 
@@ -397,20 +425,22 @@ func CloneSession(s *Session) *Session {
 	defer s.mu.RUnlock()
 
 	clone := &Session{
-		ID:           s.ID,
-		ChannelID:    s.ChannelID,
-		UserID:       s.UserID,
-		OwnerID:      s.OwnerID,
-		State:        s.State,
-		Messages:     make([]Message, len(s.Messages)),
-		RoundCount:   s.RoundCount,
-		StartedAt:    s.StartedAt,
-		LastActiveAt: s.LastActiveAt,
-		CreatedAt:    s.CreatedAt,
+		RequestEntries: maps.Clone(s.RequestEntries),
+		ID:             s.ID,
+		ChannelID:      s.ChannelID,
+		UserID:         s.UserID,
+		OwnerID:        s.OwnerID,
+		AssistantMode:  s.AssistantMode,
+		State:          s.State,
+		Messages:       make([]Message, len(s.Messages)),
+		RoundCount:     s.RoundCount,
+		StartedAt:      s.StartedAt,
+		LastActiveAt:   s.LastActiveAt,
+		CreatedAt:      s.CreatedAt,
 	}
 	copy(clone.Messages, s.Messages)
 	for i := range clone.Messages {
-		clone.Messages[i].Attachments = append([]MessageAttachment(nil), s.Messages[i].Attachments...)
+		clone.Messages[i] = cloneMessage(s.Messages[i])
 	}
 	return clone
 }

@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yuanleyao/ai-agent/internal/assistantconfig"
 	"github.com/yuanleyao/ai-agent/internal/chain"
 	"github.com/yuanleyao/ai-agent/internal/channel"
 	"github.com/yuanleyao/ai-agent/internal/console"
@@ -35,9 +36,10 @@ type App struct {
 	FilterChain *filter.Chain
 	ChMgr       *channel.Manager
 
-	SessionMgr   *SessionManager
-	SessionStore *SessionStore
-	ConsoleStore *console.Store
+	SessionMgr      *SessionManager
+	SessionStore    *SessionStore
+	ConsoleStore    *console.Store
+	AssistantConfig *assistantconfig.Store
 
 	ChainExecutor *chain.ChainExecutor
 	ChainRouter   *chain.ChainRouter
@@ -89,23 +91,29 @@ func Bootstrap(configPath string) (*App, error) {
 		return nil, err
 	}
 	var consoleStore *console.Store
+	var assistantConfig *assistantconfig.Store
 	if cfg.Console.Enabled {
 		consoleStore, err = console.OpenStore(cfg.Console.DataDir, time.Now)
 		if err != nil {
 			return nil, fmt.Errorf("console store: %w", err)
 		}
+		assistantConfig, err = assistantconfig.Open(cfg.Console.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("assistant configuration: %w", err)
+		}
 	}
 
-	backend := inference.NewOllamaClient(cfg.Inference.Endpoint, cfg.Inference.Timeout)
+	backend := inference.NewAssistantClient(inference.NewOllamaClient(cfg.Inference.Endpoint, cfg.Inference.Timeout))
 	vaultReader := vault.NewFileReaderWithPolicy(cfg.Vaults.Personal, cfg.Vaults.Agent, policy)
 
 	app := &App{
-		Config:       cfg,
-		Logger:       logger,
-		Infer:        backend,
-		VaultR:       vaultReader,
-		VaultW:       vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
-		ConsoleStore: consoleStore,
+		Config:          cfg,
+		Logger:          logger,
+		Infer:           backend,
+		VaultR:          vaultReader,
+		VaultW:          vault.NewFileWriter(cfg.Vaults.Personal, cfg.Vaults.Agent),
+		ConsoleStore:    consoleStore,
+		AssistantConfig: assistantConfig,
 	}
 
 	// Channels

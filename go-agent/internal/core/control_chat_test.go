@@ -144,3 +144,35 @@ func TestControlChatAllowsOrdinaryChatDuringHAOutage(t *testing.T) {
 		t.Fatalf("ordinary chat blocked result=%v err=%v called=%v", result, err, parser.called)
 	}
 }
+
+type modelClarificationIntent struct{ question string }
+
+func (p modelClarificationIntent) Parse(context.Context, string, chain.HACandidates) (chain.HAIntent, error) {
+	return chain.HAIntent{Kind: "clarify", Question: p.question}, nil
+}
+
+func TestControlChatDoesNotPublishModelClarificationFacts(t *testing.T) {
+	for _, question := range []string{
+		"已经为你打开了书房灯，还需要什么？",
+		"卧室门已经锁好，请放心。",
+		"你要控制哪个设备？",
+	} {
+		t.Run(question, func(t *testing.T) {
+			svc, err := smarthome.NewControlService(smarthome.ControlConfig{}, downControlCatalog{}, unusedControlHA{}, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := smarthome.ControlActor{UserID: "a", SessionID: "s"}
+			result, err := NewControlChat(svc, modelClarificationIntent{question}).Handle(context.Background(), actor, "request", "把灯处理一下")
+			if err != nil || result == nil || result.Stage != "clarify" || result.Type != "response" || result.Proposal != nil || result.DeviceResult != nil {
+				t.Fatalf("model clarification changed stage or produced control result: %+v %v", result, err)
+			}
+			if strings.Contains(result.Content, question) || !strings.Contains(result.Content, "完整设备名称") || !strings.Contains(result.Content, "尚未发送设备控制指令") {
+				t.Fatalf("model free text crossed server fact boundary: %q", result.Content)
+			}
+			if outcome, err := svc.Replay(context.Background(), actor, "request", ""); err != nil || outcome != nil {
+				t.Fatalf("clarification persisted a control result: %+v %v", outcome, err)
+			}
+		})
+	}
+}

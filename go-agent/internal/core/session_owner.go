@@ -51,6 +51,8 @@ func (ss *SessionStore) BrowserSession(channelID, userID, owner string, create b
 	s := &Session{ID: key, ChannelID: channelID, UserID: userID, OwnerID: owner, State: SessionActive, StartedAt: now, CreatedAt: now, LastActiveAt: now}
 	if !create {
 		s.Messages = sf.Messages
+		s.RequestEntries = sf.RequestEntries
+		s.AssistantMode = sf.AssistantMode
 		s.RoundCount = sf.RoundCount
 		s.StartedAt = sf.StartedAt
 	}

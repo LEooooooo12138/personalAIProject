@@ -349,3 +349,13 @@ func TestHAIntentVisibleReadOnlyTargetsDoNotSilentlyDisambiguateControl(t *testi
 		})
 	}
 }
+
+func TestHAIntentPreservesUpstreamCauseWithoutRawText(t *testing.T) {
+	cause := &inference.UpstreamError{Status: 401}
+	client := &haIntentTestClient{err: fmt.Errorf("private token: %w", cause)}
+	_, err := NewHAIntentParser(client, "local").Parse(context.Background(), "hello", haIntentCandidates())
+	var status *inference.UpstreamError
+	if !errors.Is(err, ErrHAIntentUnavailable) || !errors.As(err, &status) || status.Status != 401 || strings.Contains(err.Error(), "private") {
+		t.Fatalf("cause lost or disclosed: %v", err)
+	}
+}

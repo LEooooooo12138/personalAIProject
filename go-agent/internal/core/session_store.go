@@ -64,14 +64,16 @@ type sessionMessage struct {
 
 // sessionFile is the on-disk representation of a session.
 type sessionFile struct {
-	ID           string    `json:"id"`
-	ChannelID    string    `json:"channel_id"`
-	UserID       string    `json:"user_id"`
-	OwnerID      string    `json:"owner_id,omitempty"`
-	StartedAt    time.Time `json:"started_at"`
-	LastActiveAt time.Time `json:"last_active_at"`
-	RoundCount   int       `json:"round_count"`
-	Messages     []Message `json:"messages"`
+	RequestEntries map[string]RequestEntryBinding `json:"request_entries,omitempty"`
+	ID             string                         `json:"id"`
+	ChannelID      string                         `json:"channel_id"`
+	UserID         string                         `json:"user_id"`
+	OwnerID        string                         `json:"owner_id,omitempty"`
+	AssistantMode  string                         `json:"assistant_mode,omitempty"`
+	StartedAt      time.Time                      `json:"started_at"`
+	LastActiveAt   time.Time                      `json:"last_active_at"`
+	RoundCount     int                            `json:"round_count"`
+	Messages       []Message                      `json:"messages"`
 }
 
 // SessionHit is a search result from session history.
@@ -172,14 +174,16 @@ func (ss *SessionStore) SaveSession(s *Session) error {
 	}
 	clone := CloneSession(s)
 	sf := sessionFile{
-		ID:           clone.ID,
-		ChannelID:    clone.ChannelID,
-		UserID:       clone.UserID,
-		OwnerID:      clone.OwnerID,
-		StartedAt:    clone.StartedAt,
-		LastActiveAt: clone.LastActiveAt,
-		RoundCount:   clone.RoundCount,
-		Messages:     clone.Messages,
+		RequestEntries: clone.RequestEntries,
+		ID:             clone.ID,
+		ChannelID:      clone.ChannelID,
+		UserID:         clone.UserID,
+		OwnerID:        clone.OwnerID,
+		AssistantMode:  clone.AssistantMode,
+		StartedAt:      clone.StartedAt,
+		LastActiveAt:   clone.LastActiveAt,
+		RoundCount:     clone.RoundCount,
+		Messages:       clone.Messages,
 	}
 
 	data, err := json.MarshalIndent(sf, "", "  ")

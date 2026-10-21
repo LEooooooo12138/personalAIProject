@@ -2,11 +2,11 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"go.uber.org/zap"
-	"github.com/yuanleyao/ai-agent/internal/vault"
 )
 
 // ── Chain Executor ──
@@ -34,7 +34,7 @@ func NewChainExecutor(logger *zap.Logger, router *ChainRouter) *ChainExecutor {
 
 // ExecuteResult holds the outcome of running a chain.
 type ExecuteResult struct {
-	ChainName string
+	ChainName   string
 	FinalAnswer string
 	Error       error
 	Trace       []StepTrace
@@ -51,12 +51,7 @@ func (e *ChainExecutor) Run(ctx context.Context, chainName string, state *ChainS
 		return nil, err
 	}
 
-	fields := []zap.Field{zap.String("chain", chain.Name)}
-	// Personal knowledge inputs stay within the request's management view.
-	if state.Vault == "agent" {
-		fields = append(fields, zap.String("query", vault.Truncate(state.Query, 80)))
-	}
-	e.logger.Info("chain started", fields...)
+	e.logger.Info("chain started", zap.String("chain", chain.Name))
 
 	result := e.runChain(ctx, chain, state)
 	result.ChainName = chainName
@@ -64,7 +59,7 @@ func (e *ChainExecutor) Run(ctx context.Context, chainName string, state *ChainS
 	if result.Error != nil {
 		e.logger.Warn("chain completed with error",
 			zap.String("chain", chainName),
-			zap.Error(result.Error),
+			zap.String("error_code", safeStepErrorCode(result.Error)),
 		)
 	} else {
 		e.logger.Info("chain completed",
@@ -108,13 +103,13 @@ func (e *ChainExecutor) runChain(ctx context.Context, chain *Chain, state *Chain
 			if chain.OnError == "continue" {
 				e.logger.Warn("step error (continuing)",
 					zap.String("step", stepName),
-					zap.Error(err),
+					zap.String("error_code", safeStepErrorCode(err)),
 				)
 				trace.Status = "skipped"
 			} else {
 				e.logger.Error("step error (aborting chain)",
 					zap.String("step", stepName),
-					zap.Error(err),
+					zap.String("error_code", safeStepErrorCode(err)),
 				)
 				result.Error = fmt.Errorf("step %q: %w", stepName, err)
 				result.Trace = append(result.Trace, trace)
@@ -132,13 +127,12 @@ func (e *ChainExecutor) runChain(ctx context.Context, chain *Chain, state *Chain
 		if ds, ok := step.(DecisionStep); ok {
 			decision, err := ds.Decide(ctx, state)
 			if err != nil {
-				e.logger.Warn("step decision error", zap.String("step", stepName), zap.Error(err))
+				e.logger.Warn("step decision error", zap.String("step", stepName), zap.String("error_code", safeStepErrorCode(err)))
 				continue
 			}
 			if decision.Abort {
 				e.logger.Info("chain aborted by step",
 					zap.String("step", stepName),
-					zap.String("reason", decision.Reason),
 				)
 				result.FinalAnswer = state.FinalAnswer
 				return result
@@ -147,7 +141,6 @@ func (e *ChainExecutor) runChain(ctx context.Context, chain *Chain, state *Chain
 				e.logger.Info("chain redirect",
 					zap.String("from_step", stepName),
 					zap.String("to_chain", decision.Next),
-					zap.String("reason", decision.Reason),
 				)
 				nextChain, err := e.router.Route(decision.Next)
 				if err != nil {
@@ -180,8 +173,8 @@ func NewChain(name, description string, steps ...Step) *Chain {
 type BranchingChain struct {
 	Name       string
 	Classifier DecisionStep
-	Branches   map[string]*Chain   // class → chain
-	Default    *Chain              // fallback if no branch matches
+	Branches   map[string]*Chain // class → chain
+	Default    *Chain            // fallback if no branch matches
 }
 
 // ToChain converts the branching chain into a flat chain for the executor.
@@ -211,3 +204,14 @@ func (bc *BranchingChain) ToChain(router *ChainRouter) {
 
 // ── Helpers ──
 
+// Operational logs use a fixed vocabulary; StepTrace retains its existing error
+// contract for the request owner and must not be projected into safe metrics.
+func safeStepErrorCode(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	return "step_failed"
+}

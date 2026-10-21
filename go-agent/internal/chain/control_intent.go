@@ -63,7 +63,7 @@ func NewHAIntentParser(client inference.Client, model string) *HAIntentParser {
 // invalid reply, retries a model request, or falls back to executing text rules.
 func (p *HAIntentParser) Parse(ctx context.Context, query string, candidates HACandidates) (HAIntent, error) {
 	if err := ctx.Err(); err != nil {
-		return HAIntent{}, err
+		return HAIntent{}, haIntentFailure{cause: err}
 	}
 	if p == nil || p.client == nil || strings.TrimSpace(p.model) == "" {
 		return HAIntent{}, ErrHAIntentUnavailable
@@ -80,10 +80,10 @@ func (p *HAIntentParser) Parse(ctx context.Context, query string, candidates HAC
 	}
 	response, err := p.client.Chat(ctx, body)
 	if ctx.Err() != nil {
-		return HAIntent{}, ctx.Err()
+		return HAIntent{}, haIntentFailure{cause: ctx.Err()}
 	}
 	if err != nil {
-		return HAIntent{}, ErrHAIntentUnavailable
+		return HAIntent{}, haIntentFailure{cause: err}
 	}
 	content, err := haIntentCompletionContent(response)
 	if err != nil {
@@ -521,3 +521,10 @@ func haQueryReferencesSingleTarget(query, selectedID string, targets []HATarget)
 	}
 	return groups > 0 && (groups == 1 || !hasAmbiguity)
 }
+
+// Preserve the diagnosis without interpolating untrusted provider text.
+type haIntentFailure struct{ cause error }
+
+func (e haIntentFailure) Error() string        { return ErrHAIntentUnavailable.Error() }
+func (e haIntentFailure) Unwrap() error        { return e.cause }
+func (e haIntentFailure) Is(target error) bool { return target == ErrHAIntentUnavailable }

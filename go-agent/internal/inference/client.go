@@ -68,9 +68,8 @@ func (c *OllamaClient) ChatStream(ctx context.Context, body json.RawMessage) (<-
 		return nil, fmt.Errorf("ollama: stream: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("ollama: stream: status %d: %s", resp.StatusCode, string(body))
+		return nil, &UpstreamError{Status: resp.StatusCode}
 	}
 
 	ch := make(chan StreamChunk, 20)
@@ -125,11 +124,11 @@ func (c *OllamaClient) readSSE(ctx context.Context, resp *http.Response, ch chan
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			send(StreamChunk{Error: fmt.Errorf("ollama: stream: decode event: %w", err)})
+			send(StreamChunk{Error: ErrInvalidResponse})
 			return
 		}
 		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
-			send(StreamChunk{Error: fmt.Errorf("ollama: stream: upstream error: %s", chunk.Error)})
+			send(StreamChunk{Error: ErrInvalidResponse})
 			return
 		}
 
@@ -251,7 +250,7 @@ func (c *OllamaClient) post(ctx context.Context, path string, body json.RawMessa
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: %s: status %d: %s", path, resp.StatusCode, string(respBody))
+		return nil, &UpstreamError{Status: resp.StatusCode}
 	}
 
 	return json.RawMessage(respBody), nil

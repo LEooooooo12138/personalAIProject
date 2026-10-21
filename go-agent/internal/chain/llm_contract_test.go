@@ -289,3 +289,49 @@ func TestLLMAuxiliaryPreservesExplicitReasoning(t *testing.T) {
 		}
 	}
 }
+
+func TestLLMBufferedMalformedResponseKeepsSafeDiagnosis(t *testing.T) {
+	for _, body := range []string{"private malformed response", `{"choices":[]}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
+		step := NewLLMAnswerStep(inference.NewOllamaClient(server.URL, time.Second), "local", 0.7, zap.NewNop())
+		err := step.Run(context.Background(), NewChainState("hello", "", nil))
+		server.Close()
+		if inference.ErrorCode(err) != "inference_invalid_response" {
+			t.Errorf("malformed response lost diagnosis: %v", err)
+		}
+	}
+}
+
+func TestPersonalityPromptSurvivesContextAssemblyAndDirectRouting(t *testing.T) {
+	for _, withContext := range []bool{true, false} {
+		state := NewChainState("user-question", "agent", map[string]string{"channel": "console"})
+		state.Set("assistant_personality", "persona-marker")
+		state.Set("conversation_history", []map[string]string{{"role": "assistant", "content": "prior"}})
+		state.Sources = []VaultSource{{Title: "source", Body: "knowledge-marker"}}
+		if err := NewContextAssemblyStep(5).Run(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := buildChatRequest(state, "test", 0.7, 1024, withContext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Messages) != 4 || request.Messages[0]["role"] != "system" || strings.Contains(request.Messages[0]["content"], "persona-marker") || request.Messages[1]["role"] != "user" || !strings.Contains(request.Messages[1]["content"], "persona-marker") {
+			t.Fatalf("personality lost: %s", raw)
+		}
+		if strings.Count(string(raw), "persona-marker") != 1 {
+			t.Fatal("duplicated personality")
+		}
+		if strings.Contains(string(raw), "knowledge-marker") != withContext {
+			t.Fatal("context boundary changed")
+		}
+		if request.Messages[len(request.Messages)-1]["content"] != "user-question" {
+			t.Fatal("user request lost")
+		}
+	}
+}
