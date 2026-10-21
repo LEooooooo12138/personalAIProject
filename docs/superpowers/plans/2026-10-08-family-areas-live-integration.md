@@ -118,7 +118,7 @@ Files: web/src/api.ts、app.tsx、icons.tsx、styles.css、pages/HomePage.tsx、
 
 ## Task 5: 本机接入与HA分类落地
 
-Files: 独立.local运行配置/本机报告（不提交秘密）；go-agent/docs/console-local-setup.md；docs/family-areas-live-results-2026-10-08.md
+Files: 独立.local运行配置/本机报告（不提交秘密）；go-agent/docs/console-local-setup.md；本机私有验收记录（不随仓库发布）
 - [x] 正常 HA 授权取得短期服务端凭据，不使用旧 auth 恢复脚本。
 - [ ] 新的 365 天服务 token 具体权限与用途已说明，等待授权后创建；短期 token 不计长期运行完成。
 - [x] 真实Ollama version/tags、非敏感中文生成、临时公开唯一事实RAG；不把fixture回复当实测。
