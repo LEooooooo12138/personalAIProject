@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func startControlFixture(t *testing.T) (*fixture, string) {
+func startControlFixture(t *testing.T, extended ...bool) (*fixture, string) {
 	t.Helper()
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
@@ -23,7 +23,7 @@ func startControlFixture(t *testing.T) (*fixture, string) {
 	addr := listener.Addr().String()
 	listener.Close()
 	origin := "http://" + addr
-	f, e := newFixture(addr, origin)
+	f, e := newFixture(addr, origin, extended...)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -116,20 +116,31 @@ func controlFixtureChat(t *testing.T, origin string, cookie *http.Cookie, conten
 	}
 	var msg struct {
 		Type, SessionID string
+		Stage           string                       `json:"stage"`
+		RequestID       string                       `json:"request_id"`
 		Proposal        *smarthome.ControlProposal   `json:"proposal"`
 		DeviceResult    *smarthome.DeviceQueryResult `json:"device_result"`
 		Session         string                       `json:"session_id"`
 	}
-	for i := 0; i < 3; i++ {
+	for {
 		if e = conn.ReadJSON(&msg); e != nil {
 			t.Fatal(e)
+		}
+		if msg.Type == "chat_stage" {
+			if msg.Session == "" || msg.RequestID != "fixture-control" {
+				t.Fatalf("progress identity missing: %+v", msg)
+			}
+			switch msg.Stage {
+			case "queued", "preparing", "classifying", "generating", "saving":
+			default:
+				t.Fatalf("unknown chat stage: %+v", msg)
+			}
+			continue
 		}
 		if msg.Type != "session" {
 			return msg.Type, msg.Session, msg.Proposal, msg.DeviceResult
 		}
 	}
-	t.Fatal("no result")
-	return "", "", nil, nil
 }
 func TestFixtureControlChatAndHTTPConfirmation(t *testing.T) {
 	f, origin := startControlFixture(t)
@@ -157,5 +168,50 @@ func TestFixtureControlChatAndHTTPConfirmation(t *testing.T) {
 	kind, _, _, result := controlFixtureChat(t, origin, member, "独立温度计现在多少度")
 	if kind != "device_result" || result == nil || result.State != "23.5" || result.ObservedAt.IsZero() || f.dependencies.deviceWrites.Load() != 1 {
 		t.Fatalf("query %s %+v", kind, result)
+	}
+}
+
+func TestExtendedFixtureDoorMetadataAndExecutingTransitions(t *testing.T) {
+	f, origin := startControlFixture(t, true)
+	cookie, csrf := controlFixtureLogin(t, origin, "owner")
+	_, _, _, result := controlFixtureChat(t, origin, cookie, "审计门磁状态")
+	if result == nil || result.Domain != "binary_sensor" || result.DeviceClass == nil || *result.DeviceClass != "door" || result.State != "on" {
+		t.Fatalf("door projection: %+v", result)
+	}
+	for _, name := range []string{"延迟成功开关", "延迟待核开关"} {
+		kind, sid, proposal, query := controlFixtureChat(t, origin, cookie, "打开"+name)
+		if proposal == nil || proposal.Status != "pending" {
+			t.Fatalf("missing pending proposal: name=%s kind=%s sid=%s proposal=%+v query=%+v targets=%+v", name, kind, sid, proposal, query, f.app.Config.SmartHome.Control.Targets)
+		}
+		done := make(chan map[string]json.RawMessage, 1)
+		go func() {
+			done <- controlFixtureRequest(t, origin, "POST", "/control/proposals/"+proposal.ID+"/confirm", "{}", cookie, csrf, 200)
+		}()
+		deadline := time.Now().Add(time.Second)
+		for {
+			current := controlFixtureRequest(t, origin, "GET", "/control/proposals/"+proposal.ID, "", cookie, "", 200)
+			var status string
+			json.Unmarshal(current["status"], &status)
+			if status == "executing" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("executing was not observable")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		terminal := <-done
+		var status string
+		json.Unmarshal(terminal["status"], &status)
+		want := "succeeded"
+		if name == "延迟待核开关" {
+			want = "unknown"
+		}
+		if status != want {
+			t.Fatalf("terminal %s want %s", status, want)
+		}
+	}
+	if f.dependencies.deviceWrites.Load() != 2 {
+		t.Fatal("unexpected write retry", f.dependencies.deviceWrites.Load())
 	}
 }

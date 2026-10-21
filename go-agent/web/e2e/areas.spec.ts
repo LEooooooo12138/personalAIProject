@@ -10,6 +10,7 @@ async function login(page: Page, username = 'familyreader', origin = '') {
   await page.getByLabel('密码', { exact: true }).fill('fixture-password-123')
   await page.getByRole('button', { name: '登录', exact: true }).click()
   await expect(page.getByRole('heading', { name: '家庭概况' })).toBeVisible()
+  await page.getByText('模型安装与检查详情', { exact: true }).click()
   await expect(page.getByText('gemma4:12b 已安装')).toBeVisible()
   const response = await page.request.get(`${origin}/api/console/v1/auth/me`)
   expect(response.status()).toBe(200)
@@ -19,7 +20,7 @@ async function login(page: Page, username = 'familyreader', origin = '') {
 }
 
 async function revealEntityId(page: Page, id: string) {
-  const card = page.locator('.entity-card').filter({ has: page.getByText(id, { exact: true }) })
+  const card = page.locator('.jx-family-entity').filter({ has: page.getByText(id, { exact: true }) })
   await card.getByText('技术详情', { exact: true }).click()
   await expect(card.getByText(id, { exact: true })).toBeVisible()
 }
@@ -61,7 +62,7 @@ test('family areas navigate through real registry grouping and preserve covered 
   // The kitchen list has multiple entity-override tags until navigation settles.
   // Wait for this device's detail view before checking its own membership tag.
   await expect(page.getByRole('heading', { name: '客厅三路开关', exact: true, level: 1 })).toBeVisible()
-  await expect(page.locator('.device-context').getByText('实体覆盖到此区域', { exact: true })).toBeVisible()
+  await expect(page.locator('.jx-family-device-context').getByText('实体覆盖到此区域', { exact: true })).toBeVisible()
   await revealEntityId(page, 'switch.channel_2')
   await expect(page.getByText('switch.channel_1', { exact: true })).toHaveCount(0)
   const privateDTO = await page.request.get('/api/console/v1/areas/a_a2l0Y2hlbg/devices/d_bGl2aW5nLWNvbnRyb2w')
@@ -102,7 +103,7 @@ test('nested device deep links reload and wrong combinations return a real 404',
   await login(page, 'bobby')
   await page.goto('/app/areas/a_b3RoZXI/devices/e_c2Vuc29yLnRlbXBlcmF0dXJl')
   await expect(page.getByRole('heading', { name: '独立温度计', level: 1, exact: true })).toBeVisible()
-  await expect(page.getByText('23.5', { exact: true })).toBeVisible()
+  await expect(page.locator('.jx-metric-value')).toHaveText('23.5°C')
   await expect(page.getByText('°C', { exact: true })).toBeVisible()
   await page.reload()
   await expect(page.getByRole('heading', { name: '独立温度计', level: 1, exact: true })).toBeVisible()

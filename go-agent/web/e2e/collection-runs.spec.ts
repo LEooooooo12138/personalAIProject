@@ -1,0 +1,46 @@
+import { expect, test } from '@playwright/test'
+
+test('discovery uses accepted runs and explains successful empty history in the marked local preview', async ({ page }) => {
+ await page.goto('/app/')
+ await page.getByLabel('用户名').fill('owner')
+ await page.getByLabel('密码', { exact: true }).fill('fixture-password-123')
+ await page.getByRole('button', { name: '登录', exact: true }).click()
+ await expect(page.getByRole('heading', { name: '家庭概况' })).toBeVisible()
+ await page.goto('/app/admin/collection')
+ await expect(page.getByText('模拟预览 · 当前设备和自动化均为测试数据', { exact: true })).toBeVisible()
+ await expect(page.getByRole('heading', { name: '数据覆盖' })).toBeVisible()
+ await expect(page.getByRole('button', { name: '分析现有数据' })).toBeEnabled()
+ const before = await (await page.request.get('/api/console/v1/admin/collection')).json()
+ // This scenario requires empty observations, not globally empty run records.
+ expect(Object.values(before.coverage?.entities ?? {}).every((item: any) => item.valid_state_count === 0)).toBe(true)
+ const knownIDs = new Set(before.analysis_runs.map((run: { id: string }) => run.id))
+ await page.getByRole('button', { name: '分析现有数据' }).click()
+ await expect(page.getByText(/数据不足，当前算法无法给出结论。.*尚未安装自动化。/).first()).toBeVisible()
+ const after = await (await page.request.get('/api/console/v1/admin/collection')).json()
+ const created = after.analysis_runs.filter((run: { id: string }) => !knownIDs.has(run.id))
+ expect(created).toHaveLength(1)
+ expect(created[0].outcome).toBe('insufficient_data')
+ expect(after.latest_analysis.status).toBe('completed')
+ const identity = await (await page.request.get('/api/console/v1/auth/me')).json()
+ // Browser requests are coordinated through SharedWorker and do not appear as
+ // page fetch events. Check the HTTP acceptance contract through the same cookie.
+ const accepted = await page.request.post('/api/console/v1/admin/analyze', { headers: { Origin: 'http://127.0.0.1:18081', 'X-CSRF-Token': identity.csrf_token }, data: { days: 14 } })
+ expect(accepted.status()).toBe(202)
+ expect((await accepted.json()).run_id).toMatch(/^[a-f0-9]{32}$/)
+ // A one-hour synthetic empty history read is enough to distinguish acquisition
+ // receipts from actual observations. Never contact a real HA endpoint.
+ const end = new Date(Date.now() - 86400000)
+ const start = new Date(end.getTime() - 3600000)
+ const backfill = await page.request.post('/api/console/v1/admin/backfills', { headers: { Origin: 'http://127.0.0.1:18081', 'X-CSRF-Token': identity.csrf_token }, data: { start: start.toISOString(), end: end.toISOString() } })
+ expect(backfill.status()).toBe(202)
+ const backfillJob = await backfill.json()
+ await expect.poll(async () => (await (await page.request.get('/api/console/v1/admin/backfills/' + backfillJob.run_id)).json()).status).toBe('completed')
+ await page.getByRole('button', { name: '刷新采集显示' }).click()
+ await expect(page.getByText('HA recorder 保留能力未知。请求成功或空响应都不能证明完整保留了历史。')).toBeVisible()
+ await page.getByText('逐实体观测质量', { exact: true }).click()
+ await expect(page.getByText('有效状态观测', { exact: true })).toBeVisible()
+ await page.setViewportSize({ width: 305, height: 900 })
+ const layout = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
+ expect(layout.scroll).toBeLessThanOrEqual(layout.width)
+ await page.screenshot({ path: '../.tmp/a4-discovery-305.png', fullPage: true })
+})

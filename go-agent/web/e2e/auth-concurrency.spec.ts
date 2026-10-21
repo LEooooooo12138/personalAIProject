@@ -223,3 +223,40 @@ test('logout retry keeps failure when its queued identity recheck is unavailable
     await context.close()
   }
 })
+
+test('a delayed old request replayed with the new Cookie is rejected and cannot refill private UI', async ({ browser }) => {
+  const context = await browser.newContext()
+  const first = await context.newPage(), second = await context.newPage()
+  let gate: ReturnType<typeof proxy.gate> | undefined
+  try {
+    await login(first, 'alice')
+    const me = await context.request.get(proxy.origin + api + '/auth/me')
+    const alice = await me.json()
+    gate = proxy.gate(`${api}/sessions`, 'request')
+    await first.goto(`${proxy.origin}/app/chat`)
+    await gate.seen
+    // The worker prechecked Alice and dispatched this real request; hold it at
+    // the transport boundary while the other page changes the browser Cookie.
+    await second.goto(`${proxy.origin}/app/`)
+    await second.getByRole('button', { name: '退出登录' }).last().click()
+    await expect(first.getByRole('button', { name: '登录', exact: true })).toBeVisible()
+    await second.getByLabel('用户名').fill('bobby')
+    await second.getByLabel('密码', { exact: true }).fill('fixture-password-123')
+    await second.getByRole('button', { name: '登录', exact: true }).click()
+    await expect(second.locator('.topbar-greeting').getByText('你好，bobby')).toBeVisible()
+    const cookie = (await context.cookies(proxy.origin + api)).find((value) => value.name === 'agent_console')!
+    gate.replaceCookie(`agent_console=${cookie.value}`)
+    gate.release()
+    expect(await gate.status).toBe(401)
+    await gate.completed
+    // Also inspect the safe public rejection, retaining Alice's original
+    // precondition while the API client sends Bobby's current Cookie.
+    const rejected = await context.request.get(proxy.origin + api + '/sessions', { headers: {
+      'X-Console-Expected-User': alice.user.id, 'X-CSRF-Token': alice.csrf_token,
+    } })
+    expect(rejected.status()).toBe(401)
+    expect((await rejected.json()).error.code).toBe('identity_changed')
+    await expect(first.getByText('你好，alice')).toHaveCount(0)
+    await expect(first.getByRole('log', { name: '对话消息' })).toHaveCount(0)
+  } finally { gate?.release(); await context.close() }
+})

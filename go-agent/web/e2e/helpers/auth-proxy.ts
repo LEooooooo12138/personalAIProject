@@ -1,12 +1,12 @@
 import http, { type IncomingHttpHeaders } from 'node:http'
 import net from 'node:net'
 
-export type GateMode = 'response' | 'body' | 'fail'
-export type Gate = { seen: Promise<void>; completed: Promise<void>; release(): void }
-type InternalGate = Gate & { mode: GateMode; used: boolean; held: Promise<void>; markSeen(): void; markDone(): void }
+export type GateMode = 'response' | 'body' | 'fail' | 'request'
+export type Gate = { seen: Promise<void>; completed: Promise<void>; status: Promise<number>; replaceCookie(cookie: string): void; release(): void }
+type InternalGate = Gate & { mode: GateMode; used: boolean; held: Promise<void>; markSeen(): void; markDone(): void; markStatus(status: number): void; cookie?: string }
 
 // Transport faults live only in browser tests; the application has no test endpoint.
-export async function startAuthProxy(upstreamOrigin: string) {
+export async function startAuthProxy(upstreamOrigin: string, presentationFixtures: ReadonlyMap<string, unknown> = new Map()) {
   const upstream = new URL(upstreamOrigin)
   if (upstream.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(upstream.hostname)) throw new Error('test upstream must be HTTP loopback')
   const gates = new Map<string, InternalGate>()
@@ -22,6 +22,10 @@ export async function startAuthProxy(upstreamOrigin: string) {
     if (!request.url?.startsWith('/') || request.url.startsWith('//')) { response.writeHead(400); response.end(); return }
     const path = new URL(request.url ?? '/', origin).pathname
     counts.set(path, (counts.get(path) ?? 0) + 1)
+    // Optional read-only exceptional DTOs are isolated presentation fixtures.
+    if (request.method === 'GET' && presentationFixtures.has(path)) {
+      request.resume(); response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(presentationFixtures.get(path))); return
+    }
     const waiting = gates.get(path)
     const gate = waiting && !waiting.used ? waiting : undefined
     if (gate) gate.used = true
@@ -29,12 +33,16 @@ export async function startAuthProxy(upstreamOrigin: string) {
       request.resume()
       gate.markSeen()
       response.writeHead(503, { 'Content-Type': 'application/json' })
+      gate.markStatus(503)
       response.end(JSON.stringify({ error: { code: 'unavailable', request_id: 'proxy-fixture' } }))
       gate.markDone()
       return
     }
+    const forward = (body?: Buffer) => {
+    const headers = forwardedHeaders(request.headers)
+    if (gate?.cookie) headers.cookie = gate.cookie
     const outgoing = http.request(new URL(request.url ?? '/', upstream), {
-      method: request.method, headers: forwardedHeaders(request.headers),
+      method: request.method, headers,
     }, (incoming) => {
       const chunks: Buffer[] = []
       incoming.on('data', (chunk: Buffer) => chunks.push(chunk))
@@ -44,6 +52,7 @@ export async function startAuthProxy(upstreamOrigin: string) {
         const csp = headers['content-security-policy']
         if (typeof csp === 'string') headers['content-security-policy'] = csp.replaceAll(`ws://${upstream.host}`, `ws://${new URL(origin).host}`)
         const status = incoming.statusCode ?? 502
+        gate?.markStatus(status)
         void (async () => {
           if (gate?.mode === 'body') {
             response.writeHead(status, headers)
@@ -60,7 +69,14 @@ export async function startAuthProxy(upstreamOrigin: string) {
       })
     })
     outgoing.on('error', () => { if (!response.headersSent) response.writeHead(502); response.end(); gate?.markDone() })
-    request.pipe(outgoing)
+    if (body) outgoing.end(body)
+    else request.pipe(outgoing)
+    }
+    if (gate?.mode === 'request') {
+      const body: Buffer[] = []
+      request.on('data', (chunk: Buffer) => body.push(chunk))
+      request.on('end', () => { gate.markSeen(); void gate.held.then(() => forward(Buffer.concat(body))) })
+    } else forward()
   })
   server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
   server.on('upgrade', (request, socket, head) => {
@@ -88,11 +104,12 @@ export async function startAuthProxy(upstreamOrigin: string) {
     origin,
     counts: (path: string) => counts.get(path) ?? 0,
     gate(path: string, mode: GateMode): Gate {
-      let markSeen!: () => void, markDone!: () => void, release!: () => void
+      let markSeen!: () => void, markDone!: () => void, release!: () => void, markStatus!: (status: number) => void
       const seen = new Promise<void>((resolve) => { markSeen = resolve })
       const completed = new Promise<void>((resolve) => { markDone = resolve })
+      const status = new Promise<number>((resolve) => { markStatus = resolve })
       const held = new Promise<void>((resolve) => { release = resolve })
-      const gate = { mode, used: false, seen, completed, held, release, markSeen, markDone }
+      const gate: InternalGate = { mode, used: false, seen, completed, status, held, release, markSeen, markDone, markStatus, replaceCookie(cookie: string) { gate.cookie = cookie } }
       gates.set(path, gate)
       return gate
     },

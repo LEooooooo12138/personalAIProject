@@ -59,9 +59,26 @@ func (offlineInference) Chat(ctx context.Context, raw json.RawMessage) (json.Raw
 			}
 		}
 	}
+	if data.Query == "E2E_INFERENCE_AUTH_FAILURE" {
+		return nil, &inference.UpstreamError{Status: 401}
+	}
 	intent := chain.HAIntent{Kind: "chat"}
 	query := data.Query
-	if strings.Contains(query, "独立温度计") || strings.Contains(query, "sensor.temperature") {
+	if strings.Contains(query, "审计门磁") {
+		intent = chain.HAIntent{Kind: "query", EntityID: "binary_sensor.audit_door"}
+	} else if strings.Contains(query, "延迟成功开关") || strings.Contains(query, "延迟待核开关") {
+		id := "switch.delayed_success"
+		if strings.Contains(query, "延迟待核开关") {
+			id = "switch.delayed_unknown"
+		}
+		intent = chain.HAIntent{Kind: "query", EntityID: id}
+		if strings.HasPrefix(query, "打开") {
+			intent = chain.HAIntent{Kind: "on_off", EntityID: id, Action: "turn_on"}
+		}
+		if strings.HasPrefix(query, "关闭") {
+			intent = chain.HAIntent{Kind: "on_off", EntityID: id, Action: "turn_off"}
+		}
+	} else if strings.Contains(query, "独立温度计") || strings.Contains(query, "sensor.temperature") {
 		intent.Kind = "query"
 		intent.EntityID = "sensor.temperature"
 	} else if strings.Contains(query, "开关 1") || strings.Contains(query, "客厅灯") || strings.Contains(query, "switch.channel_1") {
@@ -102,11 +119,12 @@ func (offlineSessionEmbedder) Embed(ctx context.Context, _ string) ([]float32, e
 }
 
 type fixture struct {
-	dir          string
-	app          *core.App
-	server       *gateway.Server
-	tempPassword string
-	dependencies *fixtureDependencies
+	dir              string
+	app              *core.App
+	server           *gateway.Server
+	tempPassword     string
+	dependencies     *fixtureDependencies
+	restoreTransport func()
 }
 
 func fixtureAddress(host string, port int) (string, string, error) {
@@ -118,14 +136,32 @@ func fixtureAddress(host string, port int) (string, string, error) {
 	return listen, "http://" + listen, nil
 }
 
-func newFixture(listen, origin string) (_ *fixture, err error) {
+// Only the disposable test fixture reads this variable. The runner creates the
+// existing absolute batch root; an invalid explicit root never falls back to TEMP.
+func fixtureTempDir() (string, error) {
+	root := os.Getenv("CONSOLE_FIXTURE_TEMP_ROOT")
+	if root != "" {
+		if !filepath.IsAbs(root) {
+			return "", fmt.Errorf("fixture temp root must be absolute")
+		}
+		info, err := os.Stat(root)
+		if err != nil {
+			return "", fmt.Errorf("fixture temp root: %w", err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("fixture temp root must be an existing directory")
+		}
+	}
+	return os.MkdirTemp(root, "console-fixture-*")
+}
+func newFixture(listen, origin string, extended ...bool) (_ *fixture, err error) {
 	host, portText, splitErr := net.SplitHostPort(listen)
 	port, parseErr := strconv.Atoi(portText)
 	wantListen, wantOrigin, addressErr := fixtureAddress(host, port)
 	if splitErr != nil || parseErr != nil || addressErr != nil || listen != wantListen || origin != wantOrigin {
 		return nil, fmt.Errorf("fixture requires a canonical loopback listener and matching origin")
 	}
-	dir, err := os.MkdirTemp("", "console-fixture-*")
+	dir, err := fixtureTempDir()
 	if err != nil {
 		return nil, err
 	}
@@ -145,13 +181,30 @@ func newFixture(listen, origin string) (_ *fixture, err error) {
 	}
 	// SmartHome is constructed for on-demand catalog reads, never started;
 	// collector/scheduler are not started. Explicit confirmation targets only the mock.
-	dependencies := newFixtureDependencies()
+	extraControls := len(extended) > 0 && extended[0]
+	dependencies := newFixtureDependencies(extraControls)
 	defer func() {
 		if err != nil {
 			dependencies.Close()
 		}
 	}()
+	if len(extended) > 1 && extended[1] {
+		root := os.Getenv("CONSOLE_FIXTURE_TEMP_ROOT")
+		if root == "" {
+			return nil, fmt.Errorf("automation lifecycle requires an explicit runner-owned fixture temp root")
+		}
+		if _, err = dependencies.startLifecycleControl(root); err != nil {
+			return nil, err
+		}
+	}
 	config := fmt.Sprintf("server:\n  listen_address: %q\n  internal_key: %q\ninference:\n  endpoint: %q\n  models:\n    local: gemma4:12b\n    embedding: bge-m3:latest\nvaults:\n  personal: %q\n  agent: %q\nsmarthome:\n  enabled: true\n  base_url: %q\n  token: %q\n  control:\n    enabled: true\n    targets:\n      - entity_id: switch.channel_1\n        name: 开关 1\n        area_name: 客厅\n        aliases: [客厅灯]\n        allowed_actions: [turn_on, turn_off]\n        load_location_verified: true\nconsole:\n  enabled: true\n  data_dir: %q\n  public_origin: %q\n  allow_insecure_http: true\n", listen, hex.EncodeToString(keyBytes), dependencies.tags.URL, filepath.Join(dir, "personal"), filepath.Join(dir, "agent"), dependencies.ha.URL, fixtureHAToken, filepath.Join(dir, "accounts"), origin)
+	if extraControls {
+		extra := ""
+		for _, target := range []struct{ id, name string }{{"switch.delayed_success", "延迟成功开关"}, {"switch.delayed_unknown", "延迟待核开关"}} {
+			extra += fmt.Sprintf("      - entity_id: %s\n        name: %s\n        area_name: 其他\n        allowed_actions: [turn_on, turn_off]\n        load_location_verified: true\n", target.id, target.name)
+		}
+		config = strings.Replace(config, "\nconsole:\n", "\n"+extra+"console:\n", 1)
+	}
 	configPath := filepath.Join(dir, "fixture.yaml")
 	if err = os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		return nil, err
@@ -223,6 +276,12 @@ func newFixture(listen, origin string) (_ *fixture, err error) {
 	if err = prepareFixtureFeatures(app, router); err != nil {
 		return nil, err
 	}
+	if err = prepareFixtureDiscovery(app); err != nil {
+		return nil, err
+	}
+	if err = f.prepareProgress(router); err != nil {
+		return nil, err
+	}
 	app.ChainRouter = router
 	app.ChainExecutor = chain.NewChainExecutor(app.Logger, router)
 	f.server = gateway.NewServerFromApp(app)
@@ -230,6 +289,9 @@ func newFixture(listen, origin string) (_ *fixture, err error) {
 }
 
 func (f *fixture) Close() error {
+	if f.restoreTransport != nil {
+		f.restoreTransport()
+	}
 	f.app.SessionMgr.Stop()
 	if f.app.SmartHome != nil {
 		f.app.SmartHome.Stop()
@@ -242,6 +304,8 @@ func (f *fixture) Close() error {
 func run() error {
 	host := flag.String("host", "127.0.0.1", "loopback IP only (127.0.0.1 or ::1)")
 	port := flag.Int("port", 18081, "loopback port")
+	extended := flag.Bool("extended-controls", false, "add disposable door and delayed control audit scenarios")
+	lifecycle := flag.Bool("automation-lifecycle", false, "enable bounded synthetic HA lifecycle controls in runner temp")
 	flag.Parse()
 	listen, origin, err := fixtureAddress(*host, *port)
 	if err != nil {
@@ -250,11 +314,16 @@ func run() error {
 	if info, err := os.Lstat(filepath.Join("static", "console", "index.html")); err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("build the frontend from go-agent before starting the fixture")
 	}
-	f, err := newFixture(listen, origin)
+	f, err := newFixture(listen, origin, *extended, *lifecycle)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	restoreDirectory, err := f.enterPreviewDirectory()
+	if err != nil {
+		return err
+	}
+	defer restoreDirectory()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	f.app.SessionMgr.Start(ctx)
