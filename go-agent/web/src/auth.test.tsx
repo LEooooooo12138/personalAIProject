@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AuthProvider, useAuth } from './auth'
 
 const owner = { user: { id: 'a1', username: 'owner', display_name: '家长', role: 'admin', must_change_password: false }, capabilities: ['members:manage', 'sessions:read'], csrf_token: 'csrf-old' }
@@ -7,10 +7,10 @@ const newer = { user: { id: 'm2', username: 'new', display_name: '新用户', ro
 
 function Probe() {
   const auth = useAuth()
-  return <div><output>{auth.identity?.user.username ?? auth.status}</output><p role="alert">{auth.error}</p><button onClick={() => void auth.retryLogout()}>重试退出</button><button onClick={() => void auth.login('new', 'new-password-123')}>切换账号</button><button onClick={() => void auth.logout()}>退出</button><button onClick={() => void auth.changePassword('old-password-123', 'new-password-123')}>改密</button></div>
+  return <div><output>{auth.identity?.user.username ?? auth.status}</output><p role="alert">{auth.error}</p><span>{auth.authWaiting ? '认证操作仍在等待；当前界面已隐藏私人内容' : ''}</span><button onClick={() => void auth.retryLogout()}>重试退出</button><button onClick={() => void auth.login('new', 'new-password-123')}>切换账号</button><button onClick={() => void auth.logout()}>退出</button><button onClick={() => void auth.changePassword('old-password-123', 'new-password-123')}>改密</button></div>
 }
 function show() { return render(<AuthProvider><Probe/></AuthProvider>) }
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 it('discards a late me response after another account logs in', async () => {
   let releaseMe!: (response: Response) => void
@@ -104,4 +104,22 @@ it('finishes failed logout when retry confirms the old session is already unauth
   fireEvent.click(screen.getByRole('button', { name: '重试退出' }))
   expect(await screen.findByText('anonymous')).toBeInTheDocument()
   expect(screen.getByRole('alert')).toBeEmptyDOMElement()
+})
+
+
+it('ten-second auth waiting feedback does not release a pending logout', async () => {
+  let release!: (response: Response) => void
+  const logout = new Promise<Response>((resolve) => { release = resolve })
+  const fetcher = vi.fn(async (url: string) => url.endsWith('/auth/me') ? Response.json(owner) : url.endsWith('/auth/logout') ? logout : Response.json(newer))
+  vi.stubGlobal('fetch', fetcher)
+  show(); expect(await screen.findByText('owner')).toBeInTheDocument()
+  vi.useFakeTimers()
+  fireEvent.click(screen.getByRole('button', { name: /^退出$/ }))
+  await act(() => vi.advanceTimersByTimeAsync(10000))
+  expect(screen.getByText('认证操作仍在等待；当前界面已隐藏私人内容')).toBeInTheDocument()
+  expect(screen.queryByText('owner')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '切换账号' }))
+  expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/auth/login'))).toHaveLength(0)
+  await act(async () => { release(new Response(null, { status: 204 })); for (let i = 0; i < 20; i++) await Promise.resolve() })
+  expect(screen.getByText('new')).toBeInTheDocument()
 })

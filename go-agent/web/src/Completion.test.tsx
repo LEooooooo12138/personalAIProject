@@ -12,7 +12,8 @@ const presence = { entity_id: 'binary_sensor.home', name: '全家占用', domain
 const devices = { meta, area: { id: 'living', name: '客厅' }, devices: [{ id: 'controller', kind: 'device', name: '全家控制器', area_id: 'living', direct_area_id: 'living', membership: 'direct', entity_count: 1, domains: ['binary_sensor'], entities: [presence], load_location_verified: false }] }
 const pending = { id: 's-old', status: 'pending', created_at: '2026-10-09T00:00:00Z', title: '晚间灯光建议', confidence: 0.8, time_zone: 'Asia/Shanghai', entity_ids: ['light.room'], rule: null, missing_bindings: ['presence'], unsupported_code: null, shared: false, can_bind: true, can_confirm: false, can_ignore: true, evidence: { sample_size: null, period_days: 14 } }
 const bound = { ...pending, id: 's-new', source_suggestion_id: 's-old', missing_bindings: [], can_bind: false, can_confirm: true, rule: { triggers: [{ platform: 'time', at: '18:00:00' }], conditions: [{ condition: 'state', entity_id: 'binary_sensor.home', state: 'on' }], actions: [{ service: 'light.turn_on', target: { entity_id: 'light.room' } }] } }
-const confirmed = { ...bound, status: 'confirmed', can_confirm: false, can_ignore: false }
+const confirmed = { ...bound, status: 'confirmed', can_confirm: false, can_ignore: false, installation_state: 'verified', installation: { id: 'operation-new', suggestion_id: 's-new', suggestion_version: 's-new', status: 'confirmed', phase: 'complete', created_at: '2026-10-15T00:00:00Z', updated_at: '2026-10-15T00:00:00Z', config_status: 'matching', mapping_status: 'verified', load_status: 'verified', archive_status: 'complete', ownership: 'managed', can_reconcile: true, legacy_unverified: false } }
+const sharedResult = { id: bound.id, title: bound.title, created_at: bound.created_at, time_zone: bound.time_zone, rule: bound.rule, entity_ids: ["light.room", "binary_sensor.home"], entities: [], evidence: bound.evidence, shared: false, historical: true, history_status: "recorded" }
 const collection = { phase: 'failed', last_attempt_at: '2026-10-09T01:00:00Z', last_success_at: null, last_failure_at: '2026-10-09T01:00:01Z', error_code: 'ha_timeout', snapshot_at: '2026-10-09T01:00:00Z', window_start: '2026-10-08T01:00:00Z', window_end: '2026-10-09T01:00:00Z', completed_batches: 2, total_batches: 4, checkpoint: '2026-10-08T01:00:00Z' }
 const failure = (code: string, status: number) => Response.json({ error: { code, message: 'SECRET RAW ERROR', request_id: 'req-test' } }, { status })
 type Transport = (path: string, options: RequestInit) => Response | Promise<Response> | undefined
@@ -31,6 +32,7 @@ function show(path: string, role: 'member' | 'admin' = 'member', transport: Tran
     if (target === '/admin/sharing') return Response.json({ revision: 3, suggestion_ids: [] })
     if (target === '/admin/vault/status') return Response.json({ vault: 'personal', page_count: 2, total_bytes: 123 })
     if (target === '/admin/collection') return Response.json(collection)
+    if (target === '/admin/analysis-runs/analysis-test') return Response.json({ id: 'analysis-test', status: 'completed', requested_window: { start: '2026-09-25T00:00:00Z', end: '2026-10-09T00:00:00Z' }, home_timezone: 'UTC', created_at: '2026-10-09T00:00:00Z', algorithm_version: 'deterministic-v1', outcome: 'matched', counts: { entries: 28, patterns: 2, suggestions: 2, excluded: {} }, outcomes: {}, coverage: { entities: {} } })
     return failure('not_found', 404)
   })
   vi.stubGlobal('fetch', fetcher)
@@ -38,6 +40,11 @@ function show(path: string, role: 'member' | 'admin' = 'member', transport: Tran
   return fetcher
 }
 afterEach(() => vi.unstubAllGlobals())
+async function selectPresence() {
+  fireEvent.change(await screen.findByLabelText('房间'), { target: { value: 'living' } })
+  fireEvent.change(screen.getByLabelText('设备'), { target: { value: 'controller' } })
+  fireEvent.change(screen.getByLabelText('实体'), { target: { value: 'binary_sensor.home' } })
+}
 
 // These assertions fail if the public/personal boundary or explicit-action workflow is lost.
 describe('knowledge workflows', () => {
@@ -114,22 +121,33 @@ describe('knowledge workflows', () => {
 
 describe('automation workflows', () => {
   it('binds to a new ID and requires a separate confirmation action', async () => {
-    const fetcher = show('/app/automations?id=s-old', 'admin', (path) => path.endsWith('/s-old/bindings') ? Response.json({ suggestion: bound }) : path.endsWith('/s-new/confirm') ? Response.json({ suggestion: confirmed }) : undefined)
+    let savedBinding = false
+    let savedConfirmation = false
+    const superseded = { ...pending, status: 'superseded', superseded_by: bound.id, can_bind: false, can_confirm: false, can_ignore: false }
+    const fetcher = show('/app/automations?id=s-old', 'admin', (path) => {
+      if (path.endsWith('/s-old/bindings')) { savedBinding = true; return Response.json({ suggestion: bound }) }
+      if (path.endsWith('/s-new/confirm')) { savedConfirmation = true; return Response.json({ suggestion: confirmed }) }
+      if (path === '/suggestions') {
+        const suggestions = savedBinding ? [superseded, savedConfirmation ? confirmed : bound] : [pending]
+        return Response.json({ suggestions, count: suggestions.length })
+      }
+      return undefined
+    })
     fireEvent.click(await screen.findByRole('button', { name: '补齐有人在家条件' }))
-    fireEvent.change(await screen.findByLabelText('代表全家的占用实体'), { target: { value: 'binary_sensor.home' } })
+    await selectPresence()
     fireEvent.change(screen.getByLabelText('有人在家时的状态'), { target: { value: 'on' } })
     fireEvent.click(screen.getByRole('button', { name: '保存绑定并查看新版本' }))
-    expect(await screen.findByText('新版本：s-new')).toBeInTheDocument()
+    expect(await screen.findByText('s-new')).toBeInTheDocument()
     expect(screen.getByText('light.turn_on')).toBeInTheDocument()
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/confirm'))).toHaveLength(0)
     fireEvent.click(screen.getByRole('button', { name: '确认创建自动化' }))
-    expect(await screen.findByText('已确认安装并归档')).toBeInTheDocument()
+    expect(await screen.findByText('已核实安装并归档')).toBeInTheDocument()
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/s-new/confirm'))).toHaveLength(1)
   })
   it('keeps bindings on validation failure without automatic resubmission', async () => {
     const fetcher = show('/app/automations?id=s-old', 'admin', (path) => path.endsWith('/bindings') ? failure('invalid_request', 422) : undefined)
     fireEvent.click(await screen.findByRole('button', { name: '补齐有人在家条件' }))
-    fireEvent.change(await screen.findByLabelText('代表全家的占用实体'), { target: { value: 'binary_sensor.home' } })
+    await selectPresence()
     fireEvent.change(screen.getByLabelText('有人在家时的状态'), { target: { value: 'on' } })
     fireEvent.click(screen.getByRole('button', { name: '保存绑定并查看新版本' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('检查输入')
@@ -143,15 +161,16 @@ describe('automation workflows', () => {
     expect(screen.queryByText('s-old')).not.toBeInTheDocument()
     expect(fetcher.mock.calls.some(([url]) => url.includes('/admin/sharing'))).toBe(false)
   })
-  it('requires refresh before explicitly retrying an applying result', async () => {
-    const fetcher = show('/app/automations?id=s-new', 'admin', (path) => path === '/suggestions' ? Response.json({ suggestions: [{ ...bound, status: 'applying' }], count: 1 }) : path.endsWith('/confirm') ? Response.json({ suggestion: confirmed }) : undefined)
-    expect(await screen.findByRole('button', { name: '明确重试创建自动化' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '核对最新建议状态' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: '明确重试创建自动化' })).toBeEnabled())
+  it('requires explicit read-only reconciliation for an uncertain installation without repeating confirmation', async () => {
+    const op = { ...confirmed.installation, status: 'unknown', phase: 'reload', load_status: 'unknown', archive_status: 'not_ready' }
+    const fetcher = show('/app/automations?id=s-new', 'admin', (path) => path === '/suggestions' ? Response.json({ suggestions: [{ ...bound, status: 'unknown', can_confirm: false, installation: op, installation_state: 'unknown' }], count: 1 }) : path.endsWith('/operation-new/reconcile') ? Response.json({ operation: op }) : undefined)
+    fireEvent.click(await screen.findByRole('button', { name: '只读核对安装状态' }))
+    await waitFor(() => expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/operation-new/reconcile'))).toHaveLength(1))
+    expect(screen.queryByRole('button', { name: '明确重试创建自动化' })).not.toBeInTheDocument()
     expect(fetcher.mock.calls.some(([url]) => url.endsWith('/confirm'))).toBe(false)
   })
   it('reports a sharing revision conflict without silently overwriting', async () => {
-    const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: [confirmed], count: 1 }) : path === '/admin/sharing' && options?.method === 'PUT' ? failure('conflict', 409) : undefined)
+    const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: [confirmed], shared_results: [sharedResult], count: 1 }) : path === '/admin/sharing' && options?.method === 'PUT' ? failure('conflict', 409) : undefined)
     fireEvent.click(await screen.findByLabelText('共享：晚间灯光建议'))
     fireEvent.click(screen.getByRole('button', { name: '保存结果共享' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('刷新')
@@ -160,7 +179,7 @@ describe('automation workflows', () => {
     expect(JSON.parse(writes[0][1]!.body as string)).toEqual({ revision: 3, suggestion_ids: ['s-new'] })
   })
   it('shows service failure rather than an empty member results page', async () => {
-    show('/app/automations', 'member', (path) => path === '/suggestions' ? failure('ha_unavailable', 503) : undefined)
+    show('/app/automations', 'member', (path) => path === '/suggestions' || path === '/automations' ? failure('ha_unavailable', 503) : undefined)
     expect(await screen.findByRole('alert')).toHaveTextContent('HA')
     expect(screen.queryByText('暂无已共享结果')).not.toBeInTheDocument()
   })
@@ -178,10 +197,10 @@ describe('accurate family status and collection', () => {
     let release!: (response: Response) => void
     const task = new Promise<Response>((resolve) => { release = resolve })
     const fetcher = show('/app/admin/collection', 'admin', (path) => path === '/admin/analyze' ? task : undefined)
-    fireEvent.click(await screen.findByRole('button', { name: '分析最近 14 天' })); fireEvent.click(screen.getByRole('button', { name: '分析中…' }))
+    fireEvent.click(await screen.findByRole('button', { name: '分析现有数据' })); fireEvent.click(screen.getByRole('button', { name: '正在提交分析…' }))
     expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/admin/analyze'))).toHaveLength(1)
-    await act(async () => release(Response.json({ period_start: '2026-09-25T00:00:00Z', period_end: '2026-10-09T00:00:00Z', suggestion_count: 2 })))
-    expect(await screen.findByText('分析完成，产生 2 条建议；尚未安装自动化。')).toBeInTheDocument()
+    await act(async () => release(Response.json({ run_id: 'analysis-test', status: 'queued' }, { status: 202 })))
+    expect(await screen.findByText('发现符合门槛的规律。本次建议 2 条；尚未安装自动化。')).toBeInTheDocument()
     const options = fetcher.mock.calls.find(([url]) => url.endsWith('/admin/analyze'))![1]
     expect(JSON.parse(options!.body as string)).toEqual({ days: 14 })
   })
@@ -205,7 +224,7 @@ it('does not navigate to a delayed binding version after the administrator chose
   const task = new Promise<Response>((resolve) => { release = resolve })
   show('/app/automations?id=s-old', 'admin', (path) => path === '/suggestions' ? Response.json({ suggestions: [pending, { ...pending, id: 's-other', title: '另一条建议' }], count: 2 }) : path.endsWith('/bindings') ? task : undefined)
   fireEvent.click(await screen.findByRole('button', { name: '补齐有人在家条件' }))
-  fireEvent.change(await screen.findByLabelText('代表全家的占用实体'), { target: { value: 'binary_sensor.home' } })
+  await selectPresence()
   fireEvent.change(screen.getByLabelText('有人在家时的状态'), { target: { value: 'on' } })
   fireEvent.click(screen.getByRole('button', { name: '保存绑定并查看新版本' }))
   fireEvent.click(screen.getByRole('link', { name: '返回自动化结果' }))
@@ -217,7 +236,7 @@ it('does not navigate to a delayed binding version after the administrator chose
 
 it('freezes the sharing revision together with the edited selection across polling', async () => {
   let revision = 3
-  const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: [confirmed], count: 1 }) : path === '/admin/sharing' ? options.method === 'PUT' ? failure('conflict', 409) : Response.json({ revision, suggestion_ids: [] }) : undefined)
+  const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: [confirmed], shared_results: [sharedResult], count: 1 }) : path === '/admin/sharing' ? options.method === 'PUT' ? failure('conflict', 409) : Response.json({ revision, suggestion_ids: [] }) : undefined)
   fireEvent.click(await screen.findByLabelText('共享：晚间灯光建议'))
   revision = 4
   fireEvent(document, new Event('visibilitychange'))
@@ -228,17 +247,28 @@ it('freezes the sharing revision together with the edited selection across polli
 })
 
 it('allows a fresh server result to replace a locally returned binding version', async () => {
+  let savedBinding = false
   let updated = false
-  show('/app/automations?id=s-old', 'admin', (path) => path === '/suggestions' ? Response.json({ suggestions: updated ? [{ ...bound, status: 'ignored', can_confirm: false, can_ignore: false }] : [pending], count: 1 }) : path.endsWith('/bindings') ? Response.json({ suggestion: bound }) : undefined)
+  const superseded = { ...pending, status: 'superseded', superseded_by: bound.id, can_bind: false, can_confirm: false, can_ignore: false }
+  const fetcher = show('/app/automations?id=s-old', 'admin', (path) => {
+    if (path.endsWith('/bindings')) { savedBinding = true; return Response.json({ suggestion: bound }) }
+    if (path === '/suggestions') {
+      const suggestions = savedBinding ? [superseded, updated ? { ...bound, status: 'ignored', can_confirm: false, can_ignore: false } : bound] : [pending]
+      return Response.json({ suggestions, count: suggestions.length })
+    }
+    return undefined
+  })
   fireEvent.click(await screen.findByRole('button', { name: '补齐有人在家条件' }))
-  fireEvent.change(await screen.findByLabelText('代表全家的占用实体'), { target: { value: 'binary_sensor.home' } })
+  await selectPresence()
   fireEvent.change(screen.getByLabelText('有人在家时的状态'), { target: { value: 'on' } })
   fireEvent.click(screen.getByRole('button', { name: '保存绑定并查看新版本' }))
-  await screen.findByText('新版本：s-new')
+  await screen.findByText('s-new')
   updated = true
   fireEvent(document, new Event('visibilitychange'))
   expect(await screen.findByText('已忽略，未执行')).toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '确认创建自动化' })).not.toBeInTheDocument()
+  expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/bindings'))).toHaveLength(1)
+  expect(fetcher.mock.calls.some(([url]) => url.endsWith('/confirm'))).toBe(false)
 })
 
 it('does not label an old snapshot as evidence that the current failure was in history', async () => {
@@ -269,7 +299,7 @@ it('requires a successful version check after a confirmation conflict before ano
   await waitFor(() => expect(screen.getByRole('button', { name: '确认创建自动化' })).toBeEnabled())
   expect(fetcher.mock.calls.filter(([url]) => url.endsWith('/confirm'))).toHaveLength(1)
   fireEvent.click(screen.getByRole('button', { name: '确认创建自动化' }))
-  expect(await screen.findByText('已确认安装并归档')).toBeInTheDocument()
+  expect(await screen.findByText('已核实安装并归档')).toBeInTheDocument()
 })
 
 
@@ -298,7 +328,7 @@ it.each(['broken', 'missing'])('allows withdrawal of a %s legacy shared ID while
   let revision = 3
   const legacyId = kind === 'broken' ? 's-broken' : 's-missing'
   const legacy = { ...confirmed, id: legacyId, title: '旧结果', rule: null, unsupported_code: 'invalid_rule' }
-  const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: kind === 'broken' ? [confirmed, legacy] : [confirmed], count: kind === 'broken' ? 2 : 1 }) : path === '/admin/sharing' ? options.method === 'PUT' ? Response.json({ revision: 5, suggestion_ids: ['s-new'] }) : Response.json({ revision, suggestion_ids: ['s-new', legacyId] }) : undefined)
+  const fetcher = show('/app/automations', 'admin', (path, options) => path === '/suggestions' ? Response.json({ suggestions: kind === 'broken' ? [confirmed, legacy] : [confirmed], shared_results: [sharedResult], count: kind === 'broken' ? 2 : 1 }) : path === '/admin/sharing' ? options.method === 'PUT' ? Response.json({ revision: 5, suggestion_ids: ['s-new'] }) : Response.json({ revision, suggestion_ids: ['s-new', legacyId] }) : undefined)
   fireEvent.click(await screen.findByRole('button', { name: '撤销旧授权：' + legacyId }))
   expect(screen.getByRole('button', { name: '撤销旧授权：' + legacyId })).toBeDisabled()
   expect(screen.getByLabelText('共享：晚间灯光建议')).toBeChecked()
@@ -314,10 +344,29 @@ it.each(['broken', 'missing'])('allows withdrawal of a %s legacy shared ID while
 
 it('removes a previous successful analysis result when a new analysis attempt fails', async () => {
   let attempts = 0
-  show('/app/admin/collection', 'admin', (path) => path === '/admin/analyze' ? ++attempts === 1 ? Response.json({ period_start: '2026-09-25T00:00:00Z', period_end: '2026-10-09T00:00:00Z', suggestion_count: 2 }) : failure('ha_unavailable', 503) : undefined)
-  fireEvent.click(await screen.findByRole('button', { name: '分析最近 14 天' }))
-  await screen.findByText('分析完成，产生 2 条建议；尚未安装自动化。')
-  fireEvent.click(screen.getByRole('button', { name: '分析最近 14 天' }))
+  show('/app/admin/collection', 'admin', (path) => path === '/admin/analyze' ? ++attempts === 1 ? Response.json({ run_id: 'analysis-test', status: 'queued' }, { status: 202 }) : failure('ha_unavailable', 503) : undefined)
+  fireEvent.click(await screen.findByRole('button', { name: '分析现有数据' }))
+  await screen.findByText('发现符合门槛的规律。本次建议 2 条；尚未安装自动化。')
+  fireEvent.click(screen.getByRole('button', { name: '分析现有数据' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('HA')
-  expect(screen.queryByText('分析完成，产生 2 条建议；尚未安装自动化。')).not.toBeInTheDocument()
+  expect(screen.queryByText('发现符合门槛的规律。本次建议 2 条；尚未安装自动化。')).not.toBeInTheDocument()
+})
+
+it('does not turn malformed collection timestamps into successful fact labels', async () => {
+  show('/app/admin/collection', 'admin', path => path === '/admin/collection' ? Response.json({ ...collection, snapshot_at: 'bad', last_success_at: 'bad' }) : undefined)
+  await screen.findByRole('heading', { name: '采集失败' })
+  expect(screen.queryByText('状态快照已保存')).not.toBeInTheDocument()
+  expect(screen.getByText('尚无快照成功记录')).toBeInTheDocument()
+  expect(screen.getByText('尚无完整采集成功记录')).toBeInTheDocument()
+})
+it('home treats an invalid full-success timestamp as unknown', async () => {
+  show('/app/', 'admin', path => path === '/admin/collection' ? Response.json({ ...collection, last_success_at: 'bad' }) : undefined)
+  expect(await screen.findByText('尚无本进程完整采集成功记录')).toBeInTheDocument()
+  expect(screen.queryByText(/最近完整采集：/)).not.toBeInTheDocument()
+})
+it.each([null, [null]])('keeps malformed automation actions in a readable raw fallback (%s)', async actions => {
+  show('/app/automations?id=s-new', 'admin', path => path === '/suggestions' ? Response.json({ suggestions: [{ ...bound, rule: { ...bound.rule, actions } }], count: 1 }) : undefined)
+  expect(await screen.findByText('原始规则')).toBeInTheDocument()
+  expect(screen.getByText(/规则结构包含未支持或无法核对的内容/)).toBeInTheDocument()
+  expect(screen.getByText(/"actions":/)).toBeInTheDocument()
 })

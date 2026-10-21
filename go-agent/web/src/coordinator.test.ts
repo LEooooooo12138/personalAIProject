@@ -21,6 +21,7 @@ class WorkerPort {
     for (const listener of [...this.listeners]) listener(event)
   }
 }
+const activePorts: WorkerPort[] = []
 const identity = { user: { id: 'alice' }, csrf_token: 'alice-csrf' }
 const expected = { userId: 'alice', csrfToken: 'alice-csrf' }
 function deferredResponse() {
@@ -32,8 +33,9 @@ function worker(fetcher: typeof fetch) {
   const connect = new Function('fetch', 'setTimeout', 'clearTimeout', `"use strict"; let onconnect; ${workerSource}; return onconnect`)(fetcher, setTimeout, clearTimeout) as (event: { ports: WorkerPort[] }) => void
   return () => {
     const port = new WorkerPort()
+    activePorts.push(port)
     connect({ ports: [port] })
-    port.send({ type: 'hello', version: 1 })
+    port.send({ type: 'hello', version: 2 })
     return port
   }
 }
@@ -45,7 +47,7 @@ async function result(port: WorkerPort, id: number) {
   await waitFor(() => expect(port.replies.find((message) => message.type === 'result' && message.id === id)).toBeDefined())
   return port.replies.find((message) => message.type === 'result' && message.id === id)!
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.resetModules() })
+afterEach(() => { for (const port of activePorts.splice(0)) port.send({ type: 'bye' }); vi.useRealTimers(); vi.unstubAllGlobals(); vi.resetModules() })
 
 it('page leaving during socket identity check cannot block another page', async () => {
   const held = deferredResponse()
@@ -73,7 +75,7 @@ it('cancelling a queued socket skips the handshake and allows later requests', a
   status(second, 1)
   held.resolve(Response.json({ initialized: true }))
   expect((await result(second, 1)).status).toBe(200)
-  expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/auth/me'))).toBe(false)
+  expect(first.replies.some((message) => message.lease)).toBe(false)
 })
 
 it('cancelling a socket during identity check releases the queue', async () => {
@@ -108,7 +110,7 @@ it('a new page port adopts its worker generation after pagehide and reconnect', 
     start() {}
     close() {}
     postMessage(message: Message) {
-      if (message.type === 'hello') queueMicrotask(() => this.receive({ type: 'ready', version: 1, generation: 0 }))
+      if (message.type === 'hello') queueMicrotask(() => this.receive({ type: 'ready', version: 2, generation: 0 }))
       if (message.type === 'request') queueMicrotask(() => this.receive(message.generation === 0
         ? { type: 'result', id: message.id, status: 200, body: '{"initialized":true}' }
         : { type: 'result', id: message.id, status: 0, code: 'identity_changed' }))
@@ -154,4 +156,91 @@ it('an unavailable identity check does not claim that a valid session is revoked
   expect(answer).toMatchObject({ status: 503, code: 'unavailable' })
   expect(fetcher.mock.calls).toHaveLength(1)
   expect(String(fetcher.mock.calls[0][0])).toBe('/api/console/v1/auth/me')
+})
+
+
+
+
+class ClientPort {
+  static version = 2
+  onmessage: ((event: { data: Message }) => void) | null = null
+  onmessageerror: (() => void) | null = null
+  messages: Message[] = []
+  closed = false
+  start() {}
+  close() { this.closed = true }
+  postMessage(message: Message) {
+    this.messages.push(message)
+    if (message.type === 'hello') queueMicrotask(() => this.receive({ type: 'ready', version: ClientPort.version, generation: 0 }))
+    if (message.type === 'socket') queueMicrotask(() => this.receive({ type: 'result', id: message.id, status: 200, lease: true }))
+  }
+  receive(data: Message) { this.onmessage?.({ data }) }
+}
+class ClientWorker {
+  static ports: ClientPort[] = []
+  port = new ClientPort()
+  constructor() { ClientWorker.ports.push(this.port) }
+}
+class ConnectingSocket extends EventTarget {
+  static instances: ConnectingSocket[] = []
+  close = vi.fn()
+  constructor(_url: string) { super(); ConnectingSocket.instances.push(this) }
+}
+async function flushClient() { for (let i = 0; i < 20; i++) await Promise.resolve() }
+function installSocketMocks() {
+  ClientPort.version = 2; ClientWorker.ports = []; ConnectingSocket.instances = []
+  vi.stubGlobal('SharedWorker', ClientWorker); vi.stubGlobal('WebSocket', ConnectingSocket)
+}
+
+it('old_worker_version_rejected with the stable URL and reopen instructions', async () => {
+  installSocketMocks(); ClientPort.version = 1
+  const coordinator = await import('./coordinator')
+  await expect(coordinator.coordinatedFetch('/api/console/v1/auth/status', {}, false)).rejects.toMatchObject({
+    code: 'coordination_version_mismatch', message: expect.stringContaining('请关闭旧标签后重新打开'),
+  })
+  expect(ClientWorker.ports[0].closed).toBe(true)
+  expect(ClientWorker.ports[0].messages).toEqual([{ type: 'hello', version: 2 }])
+})
+
+it('connecting socket cancellation waits for close proof before releasing', async () => {
+  installSocketMocks()
+  const coordinator = await import('./coordinator')
+  const controller = new AbortController()
+  const opening = coordinator.openChatSocket(identity as never, controller.signal)
+  const rejection = expect(opening).rejects.toMatchObject({ name: 'AbortError' })
+  await flushClient()
+  const client = ClientWorker.ports[0], socket = ConnectingSocket.instances[0]
+  controller.abort(); await rejection
+  expect(socket.close).toHaveBeenCalledTimes(1)
+  expect(client.messages.some((message) => message.type === 'release')).toBe(false)
+  socket.dispatchEvent(new Event('open'))
+  expect(client.messages.some((message) => message.type === 'release')).toBe(false)
+  socket.dispatchEvent(new Event('close'))
+  expect(client.messages.filter((message) => message.type === 'release')).toHaveLength(1)
+})
+
+it('socket handshake timeout closes and fails closed without close confirmation', async () => {
+  vi.useFakeTimers(); installSocketMocks()
+  const coordinator = await import('./coordinator')
+  const opening = coordinator.openChatSocket(identity as never, new AbortController().signal)
+  const rejection = expect(opening).rejects.toMatchObject({ code: 'request_timeout' })
+  await flushClient()
+  const client = ClientWorker.ports[0], socket = ConnectingSocket.instances[0]
+  await vi.advanceTimersByTimeAsync(10000); await rejection
+  expect(socket.close).toHaveBeenCalledTimes(1)
+  expect(client.messages.some((message) => message.type === 'release')).toBe(false)
+  await vi.advanceTimersByTimeAsync(5000)
+  expect(client.messages.some((message) => message.type === 'socket_failed')).toBe(true)
+  socket.dispatchEvent(new Event('close'))
+})
+
+it('opened sockets release the handshake lease immediately', async () => {
+  installSocketMocks()
+  const coordinator = await import('./coordinator')
+  const opening = coordinator.openChatSocket(identity as never, new AbortController().signal)
+  await flushClient()
+  const socket = ConnectingSocket.instances[0]
+  socket.dispatchEvent(new Event('open'))
+  expect(await opening).toBe(socket)
+  expect(ClientWorker.ports[0].messages.filter((message) => message.type === 'release')).toHaveLength(1)
 })

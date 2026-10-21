@@ -1,0 +1,61 @@
+@layer jx-features {
+ .chat-page{display:grid;gap:var(--jx-space-24)}
+ .chat-page .chat-layout{display:grid;grid-template-columns:minmax(220px,280px) minmax(0,1fr);gap:var(--jx-space-24);min-height:0}
+ .chat-page .chat-history,.chat-page .chat-conversation{background:var(--jx-color-surface);border:1px solid var(--jx-color-border);border-radius:var(--jx-radius-surface);min-width:0;overflow:hidden}
+ .chat-page .chat-history{padding:var(--jx-space-16);align-self:start}
+ .chat-page .chat-history-title,.chat-page .chat-conversation-head{display:flex;justify-content:space-between;align-items:center;gap:var(--jx-space-12)}
+ .chat-page .chat-history-title h2{font-size:var(--jx-font-subtitle);margin:0}
+ .chat-page .chat-history ul{display:grid;gap:var(--jx-space-8);padding:0;list-style:none;margin-top:var(--jx-space-16)}
+ .chat-page .chat-history-item{display:flex;flex-direction:column;align-items:flex-start;text-align:left;width:100%;white-space:normal;padding:var(--jx-space-12);height:auto;gap:var(--jx-space-4)}
+ .chat-page .chat-history-item span{overflow-wrap:anywhere}
+ .chat-page .chat-history-item small,.chat-page .chat-muted{color:var(--jx-color-text-muted);font-size:var(--jx-font-small)}
+ .chat-page .chat-history-item.selected{background:var(--jx-color-selected);border-color:var(--jx-color-brand)}
+ .chat-page .chat-conversation{display:flex;flex-direction:column;min-height:600px}
+ .chat-page .chat-conversation-head{padding:var(--jx-space-16) var(--jx-space-24);border-bottom:1px solid var(--jx-color-border)}
+ .chat-page .chat-conversation-head span{color:var(--jx-color-text-muted);font-size:var(--jx-font-small)}
+ .chat-page .chat-transcript{display:flex;flex-direction:column;align-items:flex-start;gap:var(--jx-space-24);overflow:auto;min-height:260px;max-height:60vh;flex:1;padding:var(--jx-space-24);scrollbar-gutter:stable}
+ .chat-page .chat-bubble{max-width:94%;min-width:0;padding:var(--jx-space-16);border:1px solid var(--jx-color-border);border-radius:var(--jx-radius-card);background:var(--jx-color-surface)}
+ .chat-page .chat-bubble.from-user{align-self:flex-end;background:var(--jx-color-selected);max-width:85%}
+ .chat-page .chat-role{display:flex;align-items:center;gap:var(--jx-space-8);margin-bottom:var(--jx-space-12);font-size:var(--jx-font-small);color:var(--jx-color-text-muted)}
+ .chat-page .chat-role .jx-avatar{width:28px;height:28px;min-width:28px;font-size:var(--jx-font-small)}
+ .chat-page .chat-markdown{overflow-wrap:anywhere;line-height:var(--jx-font-line-body)}
+ .chat-page .chat-markdown>:first-child{margin-top:0}.chat-page .chat-markdown>:last-child{margin-bottom:0}
+ .chat-page .chat-markdown pre{max-width:100%;overflow:auto;padding:var(--jx-space-12);background:var(--jx-color-surface-subtle);border-radius:var(--jx-radius-control)}
+ .chat-page .chat-markdown table{display:block;max-width:100%;overflow:auto}.chat-page .chat-markdown img{max-width:100%}
+ .chat-page .chat-status,.chat-page .chat-unavailable{padding:var(--jx-space-16);color:var(--jx-color-text-muted)}
+ .chat-page .jx-empty{margin:auto}
+ .chat-page .chat-conversation>.jx-alert{margin:var(--jx-space-16)}
+ .chat-page .chat-recovery-error{display:block;color:var(--jx-color-danger);font-size:var(--jx-font-small)}
+ .chat-page .chat-composer{padding:var(--jx-space-24);display:grid;gap:var(--jx-space-12);border-top:1px solid var(--jx-color-border)}
+ .chat-page .chat-composer-bottom{display:flex;justify-content:flex-end}
+ .chat-page .voice-controls{display:grid;gap:var(--jx-space-12);padding:var(--jx-space-16) var(--jx-space-24);border-top:1px solid var(--jx-color-border);background:var(--jx-color-surface-subtle)}
+ .chat-page .voice-service-status{display:grid;grid-template-columns:1fr 1fr;gap:var(--jx-space-16);font-size:var(--jx-font-small);color:var(--jx-color-text-muted)}
+ .chat-page .voice-service-status p{margin:var(--jx-space-4) 0 0}.chat-page .voice-service-status strong{color:var(--jx-color-text)}
+ .chat-page .voice-buttons,.chat-page .voice-playback,.chat-page .control-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:var(--jx-space-12)}
+ .chat-page .voice-hint{margin:0;font-size:var(--jx-font-small);color:var(--jx-color-text-muted)}
+ .chat-page .voice-counter{font-variant-numeric:tabular-nums;font-size:var(--jx-font-body)}
+ .control-card{min-width:0;max-width:100%;margin-top:var(--jx-space-16);overflow-wrap:anywhere}
+ .control-card>.jx-card{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--jx-space-12)}
+ .control-card>.jx-card>*{min-width:0}
+ .control-card header{display:flex;flex-wrap:wrap;gap:var(--jx-space-12);align-items:start}
+ .control-card header>*{min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+ .control-card header strong{font-size:var(--jx-font-subtitle);min-width:0}.control-card header span{color:var(--jx-color-text-muted);font-size:var(--jx-font-small);min-width:0}
+ .control-card p{margin:0;font-size:var(--jx-font-body)}
+ .control-card .control-state-flow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--jx-space-12);padding:var(--jx-space-12);background:var(--jx-color-surface-subtle);border-radius:var(--jx-radius-control)}
+ .control-card .control-target{border-left:2px solid var(--jx-color-brand);padding-left:var(--jx-space-12)}
+ .control-card .control-card-actions{display:flex;flex-wrap:wrap;gap:var(--jx-space-12)}
+ .chat-page [hidden]{display:none!important}
+ @container(max-width:599px){
+  .chat-page .chat-layout{grid-template-columns:minmax(0,1fr)}
+ }
+ @media(max-width:760px){
+  .chat-page .chat-layout{grid-template-columns:minmax(0,1fr);gap:var(--jx-space-16)}
+  .chat-page .chat-conversation{min-height:520px}.chat-page .chat-history{width:100%}
+  .chat-page .chat-transcript{padding:var(--jx-space-16);gap:var(--jx-space-16);max-height:55vh}
+  .chat-page .chat-bubble{max-width:100%;padding:var(--jx-space-12)}
+  .chat-page .chat-composer,.chat-page .voice-controls{padding:var(--jx-space-16)}
+  .chat-page .voice-service-status{grid-template-columns:minmax(0,1fr)}
+  .control-card .control-state-flow{grid-template-columns:minmax(0,1fr)}
+  .control-card .control-target{border-left:none;border-top:1px solid var(--jx-color-border);padding-left:0;padding-top:var(--jx-space-12)}
+ }
+}

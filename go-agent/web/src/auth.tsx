@@ -8,6 +8,7 @@ interface AuthContextValue {
   identity: Identity | null
   status: AuthStatus
   error: string | null
+  authWaiting: boolean
   epoch: number
   signal: AbortSignal
   isCurrent: (epoch: number) => boolean
@@ -25,6 +26,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading')
   const [error, setError] = useState<string | null>(null)
   const [epoch, setEpoch] = useState(0)
+  const [authOperations, setAuthOperations] = useState(0)
+  const [authWaiting, setAuthWaiting] = useState(false)
+  const beginAuthOperation = useCallback(() => {
+    setAuthOperations((count) => count + 1)
+    return () => setAuthOperations((count) => count - 1)
+  }, [])
+  const authBusy = authOperations > 0
+  useEffect(() => {
+    if (!authBusy) { setAuthWaiting(false); return }
+    const timer = window.setTimeout(() => setAuthWaiting(true), 10000)
+    return () => window.clearTimeout(timer)
+  }, [authBusy])
   const epochRef = useRef(0)
   const controllerRef = useRef(new AbortController())
   const identityRef = useRef<Identity | null>(null)
@@ -121,31 +134,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clear, nextEpoch, refresh])
 
   const login = useCallback(async (username: string, password: string) => {
-    // An older logout or password change may clear the HttpOnly cookie in its
-    // response. Wait for that response before requesting a new cookie.
-    while (cookieMutationsRef.current.size > 0) await Promise.allSettled([...cookieMutationsRef.current])
-    if (revocationRef.current) throw new ApiError(0, 'coordination_unavailable')
-    const expected = nextEpoch()
-    identityRef.current = null
-    setExpectedIdentity(null)
-    setIdentity(null)
-    setStatus((previous) => previous === 'anonymous' ? 'anonymous' : 'loading')
-    setError(null)
+    const finish = beginAuthOperation()
     try {
-      const next = await consoleApi.login(username, password, controllerRef.current.signal)
-      if (!isCurrent(expected)) return
-      identityRef.current = next
-      setExpectedIdentity(next)
-      setIdentity(next)
-      setStatus('ready')
-
-    } catch (cause) {
-      if (!isCurrent(expected)) return
-      setStatus('anonymous')
-      throw cause
-    }
-  }, [isCurrent, nextEpoch])
-
+      while (cookieMutationsRef.current.size > 0) await Promise.allSettled([...cookieMutationsRef.current])
+      if (revocationRef.current) throw new ApiError(0, 'coordination_unavailable')
+      const expected = nextEpoch()
+      identityRef.current = null
+      setExpectedIdentity(null)
+      setIdentity(null)
+      setStatus((previous) => previous === 'anonymous' ? 'anonymous' : 'loading')
+      setError(null)
+      const operation = consoleApi.login(username, password, controllerRef.current.signal)
+      const settled = operation.then(() => {}, () => {})
+      cookieMutationsRef.current.add(settled)
+      try {
+        const next = await operation
+        if (!isCurrent(expected)) return
+        identityRef.current = next
+        setExpectedIdentity(next)
+        setIdentity(next)
+        setStatus('ready')
+      } catch (cause) {
+        if (!isCurrent(expected)) return
+        setStatus('anonymous')
+        throw cause
+      } finally { cookieMutationsRef.current.delete(settled) }
+    } finally { finish() }
+  }, [beginAuthOperation, isCurrent, nextEpoch])
   const logout = useCallback(async () => {
     const current = identityRef.current
     clear()
@@ -154,6 +169,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     revocationRef.current = revoked
     setStatus('loading')
     const expected = epochRef.current
+    const finish = beginAuthOperation()
     const pending = consoleApi.logout(revoked.csrfToken, undefined, revoked)
     cookieMutationsRef.current.add(pending)
     try {
@@ -163,14 +179,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (isCurrent(expected)) { setStatus('logout_failed'); setError(`退出登录未完成。${errorText(cause)}`) }
     } finally {
       cookieMutationsRef.current.delete(pending)
+      finish()
     }
-  }, [clear, isCurrent])
+  }, [beginAuthOperation, clear, isCurrent])
 
   const retryLogout = useCallback(async () => {
     const revoked = revocationRef.current
     if (!revoked) return
     const expected = epochRef.current
     setStatus('loading')
+    const finish = beginAuthOperation()
     try {
       const actual = await consoleApi.me()
       if (!isCurrent(expected) || revocationRef.current !== revoked) return
@@ -192,8 +210,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStatus('logout_failed')
         setError('退出登录未完成。' + errorText(cause))
       }
-    }
-  }, [isCurrent])
+    } finally { finish() }
+  }, [beginAuthOperation, isCurrent])
 
   const changePassword = useCallback(async (oldPassword: string, newPassword: string) => {
     const current = identityRef.current
@@ -204,6 +222,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const expected = epochRef.current
     // Let the response settle even if the local identity is invalidated:
     // a late Set-Cookie can otherwise race a subsequent login.
+    const finish = beginAuthOperation()
     const pending = consoleApi.changePassword(oldPassword, newPassword, expectedIdentity.csrfToken, undefined, expectedIdentity)
     cookieMutationsRef.current.add(pending)
     try {
@@ -214,13 +233,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw cause
     } finally {
       cookieMutationsRef.current.delete(pending)
+      finish()
     }
-  }, [clear, isCurrent])
+  }, [beginAuthOperation, clear, isCurrent])
 
   const value = useMemo<AuthContextValue>(() => ({
-    identity, status, error, epoch, signal: controllerRef.current.signal, isCurrent,
+    identity, status, error, authWaiting, epoch, signal: controllerRef.current.signal, isCurrent,
     login, logout, retryLogout, changePassword, expire, refresh,
-  }), [identity, status, error, epoch, isCurrent, login, logout, retryLogout, changePassword, expire, refresh])
+  }), [identity, status, error, authWaiting, epoch, isCurrent, login, logout, retryLogout, changePassword, expire, refresh])
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 

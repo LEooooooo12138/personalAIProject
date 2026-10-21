@@ -181,3 +181,35 @@ it('clears the private account page when password write returns 401', async () =
   expect(await screen.findByRole('button', { name: '登录' })).toBeInTheDocument()
   expect(screen.queryByText('个人资料')).not.toBeInTheDocument()
 })
+
+it('authentication keeps one main landmark and explicit submit semantics', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url.endsWith('/auth/me')
+    ? json({ error: { code: 'unauthenticated' } }, 401) : json({ initialized: true })))
+  show()
+  await screen.findByLabelText('用户名')
+  expect(screen.getAllByRole('main')).toHaveLength(1)
+  expect(screen.getByRole('button', { name: '登录' })).toHaveAttribute('type', 'submit')
+  expect(screen.getByLabelText('密码')).toHaveAttribute('autocomplete', 'current-password')
+  expect(screen.getByLabelText('密码')).toHaveAttribute('type', 'password')
+})
+
+it('forced password fields keep one main landmark and submit semantics', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json(identity({ ...member, must_change_password: true }, []))))
+  show()
+  await screen.findByRole('heading', { name: '设置新密码' })
+  expect(screen.getAllByRole('main')).toHaveLength(1)
+  expect(screen.getByRole('button', { name: '保存并重新登录' })).toHaveAttribute('type', 'submit')
+  expect(screen.getByLabelText('当前密码')).toHaveAttribute('autocomplete', 'current-password')
+  expect(screen.getByLabelText('新密码')).toHaveAttribute('autocomplete', 'new-password')
+  expect(screen.getByLabelText('确认新密码')).toHaveAttribute('autocomplete', 'new-password')
+})
+
+it('private shell keeps capability navigation and a single main landmark', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json(identity(member, []))))
+  show('/app/chat')
+  await screen.findByText('当前无法使用对话')
+  expect(screen.getAllByRole('main')).toHaveLength(1)
+  expect(screen.getByRole('navigation', { name: '主导航' })).toBeInTheDocument()
+  expect(screen.getByRole('navigation', { name: '底部导航' })).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: '对话' })).not.toBeInTheDocument()
+})

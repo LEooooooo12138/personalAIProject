@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, consoleApi } from './api'
+import { ApiError, consoleApi, errorText } from './api'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -46,4 +46,61 @@ describe('console API boundary', () => {
       ['/api/console/v1/admin/members/m1/reset-password', 'POST', undefined],
     ])
   })
+})
+
+describe('safe diagnostic errors', () => {
+  it.each([
+    ['inference_auth_failed', /密钥.*(无效|认证)/],
+    ['inference_forbidden', /权限/],
+    ['inference_quota_exceeded', /额度|余额/],
+    ['inference_rate_limited', /频繁|限流/],
+    ['inference_timeout', /超时/],
+    ['inference_model_unavailable', /模型/],
+    ['control_unavailable', /设备/],
+    ['unsupported_rule', /规则/],
+    ['speech_auth_failed', /语音.*(密钥|认证)/],
+  ])('classifies %s without a generic failure', (code, expected) => {
+    expect(new ApiError(503, code).message).toMatch(expected)
+  })
+  it.each([[401, /登录/], [403, /权限/], [429, /频繁/], [502, /上游/], [504, /超时/], [503, /服务.*不可用/]])('uses HTTP %i when the error code is unknown', (status, expected) => {
+    const error = new ApiError(status, 'new_failure')
+    expect(error.message).toMatch(expected)
+    expect(error.message).toContain(`HTTP ${status}`)
+    expect(error.message).toContain('new_failure')
+  })
+  it('never displays arbitrary error code or request-id payloads as diagnostic text', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: { code: 'secret token=abc', message: 'secret body', request_id: '<secret token=abc>' } }, { status: 502 })))
+    try { await consoleApi.sessions() } catch (error) {
+      expect(errorText(error)).not.toMatch(/secret|token=abc/)
+      expect(errorText(error)).toContain('HTTP 502')
+    }
+    expect(new ApiError(500, 'constructor').message).toContain('HTTP 500')
+  })
+})
+
+it('identifies an unknown server rejection without claiming the server never responded', () => {
+  const error = new ApiError(0, 'new_chat_failure')
+  expect(error.message).toContain('new_chat_failure')
+  expect(error.message).not.toMatch(/未收到|网络连接失败/)
+})
+
+it.each(['inference', 'speech'])('explains %s content filtering and ambiguous quota/rate limits', (service) => {
+  expect(new ApiError(421, `${service}_content_filtered`).message).toMatch(/内容.*(安全|审核)/)
+  expect(new ApiError(429, `${service}_rate_limited`).message).toMatch(/额度|套餐/)
+  expect(new ApiError(403, `${service}_forbidden`).message).toContain('地区')
+})
+it('classifies malformed successful JSON as an invalid response without leaking its contents', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>private proxy error</html>', { status: 200 })))
+  const error = await consoleApi.sessions().catch((cause: unknown) => cause)
+  expect(error).toBeInstanceOf(ApiError)
+  expect(error).toMatchObject({ status: 502, code: 'invalid_response' })
+  expect(errorText(error)).toMatch(/响应.*(格式|异常)/)
+  expect(errorText(error)).not.toMatch(/网络连接失败|private proxy/)
+})
+
+it('timeout feedback preserves unknown write semantics', () => {
+  const timeout = new ApiError(0, 'request_timeout')
+  expect(errorText(timeout)).toContain('已提交的操作仍可能完成')
+  expect(errorText(timeout)).toContain('先核对结果')
+  expect(errorText(timeout)).toContain('不要重复提交')
 })

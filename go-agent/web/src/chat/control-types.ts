@@ -1,8 +1,12 @@
+import { formatEntityState } from '../entityState'
 export interface DeviceResult {
   entity_id: string
   name: string
   state: string
   observed_at: string
+  domain?: string
+  device_class?: string | null
+  unit?: string | null
 }
 export type ControlStatus = 'pending' | 'executing' | 'succeeded' | 'failed' | 'unknown' | 'cancelled' | 'expired'
 export interface ControlProposal {
@@ -21,17 +25,33 @@ export interface ControlProposal {
   error_code?: string
 }
 export interface ControlAttachment { kind: 'control_proposal'; proposal_id: string }
-export interface ChatFrame {
+export interface MessagePresentation {
+  event_id?: string
+  personality_revision?: string
+  presentation_version?: string
+}
+export type ChatEntry = 'auto' | 'chat'
+export type ChatStage = 'queued' | 'preparing' | 'classifying' | 'generating' | 'saving'
+export interface ChatStageFrame {
+  type: 'chat_stage'
+  session_id: string
+  request_id: string
+  stage: ChatStage
+}
+export interface ChatFrame extends MessagePresentation {
+  omitted_history_pairs?: number
   type?: string
   session_id?: string
   request_id?: string
   content?: string
   code?: string
+  outcome?: 'failed' | 'unknown'
   proposal?: ControlProposal
   device_result?: DeviceResult
 }
-export function deviceStateText(state: string): string {
-  return ({ on: '开启', off: '关闭', unknown: '状态未知', unavailable: '暂不可用' } as Record<string, string>)[state] ?? state
+export function deviceStateText(result: DeviceResult): string {
+  const legacyDomain = /^[a-z][a-z0-9_]*\.[a-z0-9_]+$/.test(result.entity_id) ? result.entity_id.split('.')[0] : undefined
+  return formatEntityState({ ...result, domain: result.domain ?? legacyDomain })
 }
 export function observedTime(value: string): string {
   const date = new Date(value)
@@ -51,6 +71,8 @@ export function isDeviceResult(value: unknown): value is DeviceResult {
   if (!value || typeof value !== 'object') return false
   const item = value as Record<string, unknown>
   return ['entity_id', 'name', 'state', 'observed_at'].every((key) => typeof item[key] === 'string')
+    && (!('domain' in item) || typeof item.domain === 'string')
+    && ['device_class', 'unit'].every((key) => !(key in item) || item[key] === null || typeof item[key] === 'string')
 }
 export function isControlProposal(value: unknown): value is ControlProposal {
   if (!value || typeof value !== 'object') return false

@@ -96,3 +96,96 @@ it('keeps authoritative control references scoped to the current identity and se
   state = transition(state, { type: 'identity', epoch: 2 })
   expect(state.proposals).toEqual({})
 })
+
+it('clears a failed turn without deleting prior history and rolls back only an unsent optimistic message', () => {
+  let state = transition(initialChatState(1), { type: 'select', sid: 'one' })
+  state = transition(state, { type: 'history', epoch: 1, revision: state.revision, sid: 'one', messages: [{ role: 'assistant', content: '旧回答', timestamp: '2026-01-01' }] })
+  state = transition(state, { type: 'send', content: '新问题' })
+  state = transition(state, { type: 'sendFailed', epoch: 1, revision: state.revision, message: '未发送', unsent: true })
+  expect(state).toMatchObject({ phase: 'idle', pending: null, sid: 'one', error: '未发送' })
+  expect(state.messages.map((message) => message.content)).toEqual(['旧回答'])
+  state = transition(state, { type: 'send', content: '新问题' })
+  state = transition(state, { type: 'sendFailed', epoch: 1, revision: state.revision, message: '认证失败' })
+  expect(state).toMatchObject({ phase: 'idle', pending: null, error: '认证失败' })
+  expect(state.messages.map((message) => message.content)).toEqual(['旧回答', '新问题'])
+})
+
+
+it('rollover_preserves_only_pending_turn and its original timestamp', () => {
+  let state = transition(initialChatState(3), { type: 'select', sid: 'old' })
+  state = transition(state, { type: 'history', epoch: 3, revision: state.revision, sid: 'old', messages: [{ role: 'user', content: '旧问题', timestamp: 'old' }, { role: 'assistant', content: '旧回答', timestamp: 'old' }] })
+  state = transition(state, { type: 'send', content: '本轮问题' })
+  const pending = state.messages.at(-1)!
+  const revision = state.revision
+  state = { ...state, proposals: { old: null } }
+  state = transition(state, { type: 'serverSession', epoch: 3, revision, sid: 'new' })
+  expect(state.messages).toEqual([pending])
+  expect(state.proposals).toEqual({})
+  expect(state).toMatchObject({ revision, phase: 'sending', pending: '本轮问题', sid: 'new' })
+  state = transition(state, { type: 'response', epoch: 3, revision, content: '本轮回答' })
+  expect(state.messages.map((message) => message.content)).toEqual(['本轮问题', '本轮回答'])
+})
+it('accepts first SID and identical SID while ignoring unsolicited or stale SID changes', () => {
+  const idle = initialChatState(4)
+  expect(transition(idle, { type: 'serverSession', epoch: 4, revision: 0, sid: 'unsolicited' })).toBe(idle)
+  const sending = transition(idle, { type: 'send', content: '首条' })
+  const assigned = transition(sending, { type: 'serverSession', epoch: 4, revision: 0, sid: 'first' })
+  expect(assigned.messages).toEqual(sending.messages)
+  expect(transition(assigned, { type: 'serverSession', epoch: 4, revision: 0, sid: 'first' })).toBe(assigned)
+  expect(transition(assigned, { type: 'serverSession', epoch: 3, revision: 0, sid: 'old-epoch' })).toBe(assigned)
+  expect(transition(assigned, { type: 'serverSession', epoch: 4, revision: 1, sid: 'old-revision' })).toBe(assigned)
+  const answered = transition(assigned, { type: 'response', epoch: 4, revision: 0, content: '回答' })
+  expect(transition(answered, { type: 'serverSession', epoch: 4, revision: 0, sid: 'other' })).toBe(answered)
+})
+
+
+describe('server progress ownership', () => {
+  function sending() {
+    let state = transition(initialChatState(7), { type: 'send', content: 'question', requestId: 'r-one' })
+    state = transition(state, { type: 'serverSession', epoch: 7, revision: 0, sid: 'one' })
+    return state
+  }
+  const stage = { type: 'stage' as const, epoch: 7, revision: 0, sid: 'one', requestId: 'r-one', stage: 'generating' as const }
+
+  it('accepts only a sending turn with matching epoch, revision, session and request', () => {
+    const state = sending()
+    expect(transition(state, stage).stage).toBe('generating')
+    for (const mismatch of [{ epoch: 6 }, { revision: 1 }, { sid: 'other' }, { requestId: 'old' }]) {
+      expect(transition(state, { ...stage, ...mismatch })).toEqual(state)
+    }
+    expect(transition(initialChatState(7), stage)).toEqual(initialChatState(7))
+    let legacy = transition(initialChatState(7), { type: 'send', content: 'legacy' })
+    legacy = transition(legacy, { type: 'serverSession', epoch: 7, revision: 0, sid: 'one' })
+    expect(transition(legacy, { ...stage, requestId: '' })).toEqual(legacy)
+    expect(transition(legacy, stage)).toEqual(legacy)
+  })
+
+  it('does not render again for an unchanged server stage', () => {
+    const state = transition(sending(), stage)
+    expect(transition(state, stage)).toBe(state)
+  })
+
+  it('clears the previous session stage at rollover and keeps the request identity', () => {
+    const state = transition(transition(sending(), stage), { type: 'serverSession', epoch: 7, revision: 0, sid: 'rolled' })
+    expect(state).toMatchObject({ phase: 'sending', sid: 'rolled', pendingRequestId: 'r-one', stage: null })
+    expect(transition(state, stage)).toEqual(state)
+    expect(transition(state, { ...stage, sid: 'rolled', stage: 'saving' }).stage).toBe('saving')
+  })
+
+  it.each(['response', 'sendFailed', 'unknown', 'identity', 'select', 'failure', 'structured'] as const)('clears progress on %s and ignores delayed stages', (type) => {
+    const active = transition(sending(), stage)
+    const actions = {
+      response: { type: 'response' as const, epoch: 7, revision: 0, content: 'answer' },
+      sendFailed: { type: 'sendFailed' as const, epoch: 7, revision: 0, message: 'failed' },
+      unknown: { type: 'unknown' as const, epoch: 7, revision: 0 },
+      identity: { type: 'identity' as const, epoch: 8 },
+      select: { type: 'select' as const, sid: null },
+      failure: { type: 'failure' as const, epoch: 7, revision: 0, message: 'failed' },
+      structured: { type: 'structured' as const, epoch: 7, revision: 0, sid: 'one', content: 'device answer' },
+    }
+    const done = transition(active, actions[type])
+    expect(done.stage).toBeNull()
+    expect(done.pendingRequestId).toBeNull()
+    expect(transition(done, stage)).toEqual(done)
+  })
+})

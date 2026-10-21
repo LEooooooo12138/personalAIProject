@@ -1,0 +1,9 @@
+@layer jx-features {
+ .jx-family-search,.jx-family-filter {display:flex;align-items:flex-end;gap:var(--jx-space-16);flex-wrap:wrap}.jx-family-search>.jx-field {flex:1 1 240px}.jx-family-filter>.jx-field {flex:1 1 240px;max-width:440px}
+ .jx-family-area-link,.jx-family-device-link {display:block;max-width:100%;min-width:0;color:var(--jx-color-text);text-decoration:none;overflow-wrap:anywhere}
+ .jx-family-area-link h2 {font-size:var(--jx-font-subtitle);margin:0}.jx-family-device-link h3 {font-size:var(--jx-font-subtitle);margin:0 0 var(--jx-space-8)}
+ .jx-family-device-link {padding:var(--jx-space-16);border:1px solid var(--jx-color-field-border);border-radius:var(--jx-radius-card);background:var(--jx-color-surface)}
+ .jx-family-device-link:hover {background:var(--jx-color-selected)}.jx-family-device-link .jx-list-row {padding:0}
+ .jx-family-matches {margin-top:var(--jx-space-16);border-top:1px solid var(--jx-color-border)}.jx-family-matches a {display:block;color:var(--jx-color-brand);text-decoration:none}
+ .jx-family-entity {min-width:0}.jx-family-entity code {overflow-wrap:anywhere}
+}

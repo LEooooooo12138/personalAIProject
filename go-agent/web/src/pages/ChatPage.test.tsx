@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ChatPage from './ChatPage'
@@ -12,7 +12,7 @@ const { sessions, messages, openChatSocket, capabilities, authSupport } = vi.hoi
   authSupport: { isCurrent: (epoch: number): boolean => epoch === 1, expire: vi.fn(), signal: new AbortController().signal, epoch: 1, userId: 'alice' },
 }))
 vi.mock('../api', async (importOriginal) => ({ ...(await importOriginal<typeof import('../api')>()), consoleApi: { sessions, messages, me: async () => ({ user: { id: 'alice' } }) } }))
-vi.mock('../coordinator', () => ({ openChatSocket, coordinatedFetch: (url: string, options: RequestInit) => fetch(url, options) }))
+vi.mock('../coordinator', () => ({ openChatSocket, coordinatedFetch: (url: string, options: RequestInit) => url.endsWith('/speech/status') ? Promise.resolve(Response.json({ asr_mode: 'local', tts_mode: 'local', cloud_configured: false, local_asr_configured: false, local_tts_configured: false })) : fetch(url, options) }))
 vi.mock('../auth', () => ({ useAuth: () => ({
   identity: { user: { id: authSupport.userId, username: 'alice', display_name: 'Alice', role: 'member', must_change_password: false }, capabilities: capabilities.value, csrf_token: 'memory-only' },
   epoch: authSupport.epoch, signal: authSupport.signal, isCurrent: authSupport.isCurrent, expire: authSupport.expire,
@@ -167,8 +167,8 @@ describe('chat composer', () => {
     await waitFor(() => expect(FakeSocket.sockets[0].sent).toHaveLength(1))
     await act(async () => FakeSocket.sockets[0].close())
     await waitFor(() => expect(sessions).toHaveBeenCalledTimes(2))
-    expect(document.querySelector('.chat-alert')).toHaveTextContent('重发可能产生重复')
-    expect(document.querySelector('.chat-alert')).toHaveTextContent('服务暂时不可用')
+    expect(document.querySelector('.chat-conversation > .jx-alert')).toHaveTextContent('重发可能产生重复')
+    expect(document.querySelector('.chat-conversation > .jx-alert')).toHaveTextContent('服务暂时不可用')
     expect(screen.queryByRole('button', { name: '重试上一条' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '再次核对历史' }))
     await screen.findByRole('button', { name: '重试上一条' })
@@ -368,7 +368,8 @@ it('deduplicates confirmation across repeated history references to the same pro
   render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
   await screen.findAllByRole('button', { name: '确认打开客厅主灯' })
   const buttons = screen.getAllByRole('button', { name: '确认打开客厅主灯' })
-  fireEvent.click(buttons[0]); fireEvent.click(buttons[1])
+  expect(buttons).toHaveLength(1)
+  fireEvent.click(buttons[0]); fireEvent.click(buttons[0])
   expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/confirm'))).toHaveLength(1)
 })
 it('clears control cards on identity changes and discards a late confirmation from the previous account', async () => {
@@ -547,4 +548,429 @@ it('keeps a generic server error uncertain without automatically resending the s
   expect(socket.sent).toHaveLength(1)
   expect(FakeSocket.sockets).toHaveLength(1)
   expect(vi.mocked(fetch)).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['inference_auth_failed', /密钥.*(无效|认证)/],
+  ['inference_quota_exceeded', /额度|余额/],
+  ['inference_rate_limited', /频繁|限流/],
+  ['inference_model_unavailable', /模型/],
+  ['key_unavailable', /密钥.*(未配置|读取)/],
+])('shows definite %s failures without duplicate-risk warnings or automatic resend', async (code, expected) => {
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  const input = await screen.findByRole('textbox', { name: '消息内容' })
+  fireEvent.change(input, { target: { value: '你好' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]; socket.open()
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  await act(async () => socket.receive({ type: 'session', session_id: 'one' }))
+  await act(async () => socket.receive({ type: 'error', code, outcome: 'failed', message: 'secret upstream token' }))
+  expect(screen.getByRole('alert')).toHaveTextContent(expected)
+  expect(screen.getByRole('alert')).not.toHaveTextContent(/重发可能|secret/)
+  expect(input).toBeEnabled()
+  expect(socket.closed).toBe(true)
+  expect(socket.sent).toHaveLength(1)
+  expect(FakeSocket.sockets).toHaveLength(1)
+  expect(messages).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: '重试上一条' })).toBeNull()
+})
+
+it.each([new ApiError(403, 'forbidden'), new ApiError(0, 'network')])('restores an unsent draft after a rejected handshake: %s', async (cause) => {
+  openChatSocket.mockRejectedValueOnce(cause)
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  const input = await screen.findByRole('textbox', { name: '消息内容' })
+  fireEvent.change(input, { target: { value: '尚未发送的消息' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('消息尚未发送')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('重发可能')
+  expect(input).toHaveValue('尚未发送的消息')
+  expect(input).toBeEnabled()
+  expect(screen.getByRole('log')).not.toHaveTextContent('尚未发送的消息')
+  expect(FakeSocket.sockets).toHaveLength(0)
+  expect(messages).not.toHaveBeenCalled()
+})
+
+it.each(['unknown', undefined])('preserves uncertainty for outcome %s while showing only safe error details', async (outcome) => {
+  render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+  const input = await screen.findByRole('textbox', { name: '消息内容' })
+  fireEvent.change(input, { target: { value: '打开灯' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]; socket.open()
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  await act(async () => socket.receive({ type: 'error', code: 'chat_publish_failed', outcome, message: 'private implementation secret' }))
+  expect(screen.getByRole('alert')).toHaveTextContent('保存')
+  expect(screen.getByRole('alert')).toHaveTextContent('重发可能产生重复')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('private implementation secret')
+  expect(input).toBeDisabled()
+  expect(socket.sent).toHaveLength(1)
+})
+
+
+it('restored_executing_reaches_terminal_by_get_only', async () => {
+ capabilities.value.push('devices:control')
+ messages.mockResolvedValue(historyWithControl)
+ const transport = vi.mocked(fetch)
+ transport.mockResolvedValueOnce(reply({ ...controlProposal, status: 'executing' }))
+   .mockResolvedValue(reply({ ...controlProposal, status: 'succeeded' }))
+ render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+ expect(await screen.findByText('已观察到目标状态')).toBeVisible()
+ expect(transport.mock.calls.length).toBeGreaterThanOrEqual(2)
+ expect(transport.mock.calls.every(([, options]) => (options?.method ?? 'GET') === 'GET')).toBe(true)
+})
+
+
+it('shares the two-read limit across history hydration and executing watchers', async () => {
+  const ids = ['p-one', 'p-two', 'p-three', 'p-four']
+  messages.mockResolvedValue({ id: 'one', messages: [{ role: 'assistant', content: '多个设备操作', timestamp: '2026-10-10T00:00:00Z', attachments: ids.map((id) => ({ kind: 'control_proposal' as const, proposal_id: id })) }, { role: 'assistant', content: '同一记录的再次引用', timestamp: '2026-10-10T00:00:01Z', attachments: [{ kind: 'control_proposal', proposal_id: 'p-one' }] }] })
+  const active = new Set<string>()
+  let peak = 0
+  let overlapping = false
+  const pending: { id: string; settle: (status: 'executing' | 'succeeded') => void }[] = []
+  vi.mocked(fetch).mockImplementation((url) => {
+    const id = String(url).split('/').at(-1)!
+    overlapping ||= active.has(id)
+    active.add(id); peak = Math.max(peak, active.size)
+    return new Promise<Response>((resolve) => pending.push({ id, settle: (status) => {
+      active.delete(id)
+      resolve(reply({ ...controlProposal, id, name: id, status }))
+    } }))
+  })
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage/></MemoryRouter>)
+  await waitFor(() => expect(pending.length).toBeGreaterThanOrEqual(2))
+  expect(pending.map(({ id }) => id)).toEqual(['p-one', 'p-two'])
+  await act(async () => pending[0].settle('executing'))
+  await waitFor(() => expect(pending).toHaveLength(3))
+  expect(pending[2].id).toBe('p-three')
+  // The first executing watcher must wait while two other history reads remain active.
+  await act(async () => pending[1].settle('succeeded'))
+  await waitFor(() => expect(pending).toHaveLength(4))
+  expect(pending[3].id).toBe('p-four')
+  await act(async () => pending[2].settle('succeeded'))
+  await waitFor(() => expect(pending).toHaveLength(5))
+  expect(pending[4].id).toBe('p-one')
+  await act(async () => { pending[3].settle('succeeded'); pending[4].settle('succeeded') })
+  await waitFor(() => expect(screen.getAllByText('已观察到目标状态')).toHaveLength(4))
+  expect(peak).toBe(2)
+  expect(overlapping).toBe(false)
+  expect(pending.filter(({ id }) => id === 'p-one')).toHaveLength(2)
+  expect(vi.mocked(fetch).mock.calls.every(([, options]) => (options?.method ?? 'GET') === 'GET')).toBe(true)
+})
+
+
+describe('server-reported chat progress', () => {
+  async function start() {
+    const view = render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+    fireEvent.change(await screen.findByRole('textbox', { name: '消息内容' }), { target: { value: 'hello' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    return { view, socket: FakeSocket.sockets[0] }
+  }
+  async function connect(socket: FakeSocket) {
+    socket.open()
+    await waitFor(() => expect(socket.sent).toHaveLength(1))
+    const requestId = JSON.parse(socket.sent[0]).request_id as string
+    await act(async () => socket.receive({ type: 'session', session_id: 'one', request_id: requestId }))
+    return requestId
+  }
+  it('shows connection honestly, then only complete matching server stages in the status region', async () => {
+    const { socket } = await start()
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在连接')
+    expect(screen.queryByText(/正在生成/)).toBeNull()
+    const requestId = await connect(socket)
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在等待服务器')
+    for (const [stage, text] of [['queued', '正在排队'], ['preparing', '正在准备'], ['classifying', '正在理解请求'], ['generating', '正在生成回答'], ['saving', '正在保存']]) {
+      await act(async () => socket.receive({ type: 'chat_stage', session_id: 'one', request_id: requestId, stage }))
+      expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent(text)
+      expect(screen.getByRole('textbox', { name: '消息内容' })).toBeDisabled()
+      expect(socket.closed).toBe(false)
+    }
+    for (const frame of [
+      { type: 'chat_stage', stage: 'queued' },
+      { type: 'chat_stage', session_id: 'other', request_id: requestId, stage: 'queued' },
+      { type: 'chat_stage', session_id: 'one', request_id: 'old', stage: 'queued' },
+      { type: 'chat_stage', session_id: 'one', request_id: requestId, stage: 'invalid' },
+    ]) await act(async () => socket.receive(frame))
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在保存')
+    expect(socket.sent).toHaveLength(1)
+  })
+
+  it('follows server session rollover and ignores earlier-session stages', async () => {
+    const { socket } = await start()
+    const requestId = await connect(socket)
+    await act(async () => socket.receive({ type: 'chat_stage', session_id: 'one', request_id: requestId, stage: 'preparing' }))
+    await act(async () => socket.receive({ type: 'session', session_id: 'two', request_id: requestId }))
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在等待服务器')
+    await act(async () => socket.receive({ type: 'chat_stage', session_id: 'one', request_id: requestId, stage: 'saving' }))
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在等待服务器')
+    await act(async () => socket.receive({ type: 'chat_stage', session_id: 'two', request_id: requestId, stage: 'generating' }))
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在生成回答')
+  })
+
+  it.each(['response', 'error', 'device_result', 'disconnect', 'cancel', 'identity'] as const)('clears progress at %s and ignores late frames', async (terminal) => {
+    const { view, socket } = await start()
+    const requestId = await connect(socket)
+    await act(async () => socket.receive({ type: 'chat_stage', session_id: 'one', request_id: requestId, stage: 'generating' }))
+    expect(within(screen.getByRole('log')).getByRole('status')).toHaveTextContent('正在生成回答')
+    if (terminal === 'cancel') fireEvent.click(screen.getByRole('button', { name: '新对话' }))
+    else if (terminal === 'identity') {
+      authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+      view.rerender(<MemoryRouter initialEntries={['/app/chat']}><ChatPage/></MemoryRouter>)
+    } else if (terminal === 'disconnect') await act(async () => socket.close())
+    else await act(async () => socket.receive({ type: terminal, session_id: 'one', request_id: requestId, content: 'answer', code: 'inference_rate_limited', outcome: 'failed', device_result: { entity_id: 'switch.one', name: 'lamp', state: 'off', observed_at: '2026-10-15T00:00:00Z' } }))
+    await act(async () => socket.receive({ type: 'chat_stage', session_id: 'one', request_id: requestId, stage: 'saving' }))
+    expect(screen.queryByText('正在生成回答')).toBeNull()
+    expect(screen.queryByText('正在保存')).toBeNull()
+    expect(FakeSocket.sockets).toHaveLength(1)
+    expect(socket.sent).toHaveLength(1)
+  })
+})
+
+
+describe('chat entry selection', () => {
+  const entry = () => screen.getByRole('combobox', { name: '聊天入口' })
+  async function send(content = '请打开客厅灯') {
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: content } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    const socket = FakeSocket.sockets.at(-1)!
+    await act(async () => socket.open())
+    await waitFor(() => expect(socket.sent).toHaveLength(1))
+    return socket
+  }
+  it('defaults legacy sessions to auto and freezes the selected chat entry through the handshake', async () => {
+    render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    expect(entry()).toHaveValue('auto')
+    expect(screen.getByText('普通聊天只回答问题，不发起设备操作')).toBeVisible()
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '你好' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    expect(entry()).toBeDisabled()
+    fireEvent.change(entry(), { target: { value: 'auto' } })
+    expect(entry()).toHaveValue('chat')
+    await act(async () => FakeSocket.sockets[0].open())
+    await waitFor(() => expect(FakeSocket.sockets[0].sent).toHaveLength(1))
+    expect(JSON.parse(FakeSocket.sockets[0].sent[0])).toMatchObject({ entry: 'chat', session_id: 'one', content: '你好' })
+    await act(async () => FakeSocket.sockets[0].receive({ type: 'response', content: '你好呀' }))
+    expect(entry()).toBeEnabled()
+    fireEvent.change(entry(), { target: { value: 'auto' } })
+    const next = await send('下一轮')
+    expect(JSON.parse(next.sent[0]).entry).toBe('auto')
+  })
+  it('retains the original request ID and chat entry for explicit retry after the next selection changes', async () => {
+    render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    const first = await send()
+    await act(async () => first.close())
+    fireEvent.click(await screen.findByRole('button', { name: '重试上一条' }))
+    fireEvent.change(entry(), { target: { value: 'auto' } })
+    const retried = await send()
+    expect(entry()).toHaveValue('chat')
+    expect(JSON.parse(first.sent[0]).entry).toBe('chat')
+    expect(JSON.parse(retried.sent[0])).toEqual(JSON.parse(first.sent[0]))
+  })
+  it.each(['pending', 'retry'] as const)('clears %s entry state on identity change and discards late frames', async (phase) => {
+    const view = render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    const first = await send('旧身份')
+    if (phase === 'retry') {
+      await act(async () => first.close())
+      fireEvent.click(await screen.findByRole('button', { name: '重试上一条' }))
+    }
+    authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+    view.rerender(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await act(async () => first.receive({ type: 'response', content: '旧回复' }))
+    expect(entry()).toHaveValue('auto')
+    expect(screen.queryByText('旧身份')).toBeNull()
+    expect(screen.queryByText('旧回复')).toBeNull()
+    expect(screen.queryByRole('button', { name: '重试上一条' })).toBeNull()
+    const next = await send('旧身份')
+    expect(JSON.parse(next.sent[0]).entry).toBe('auto')
+    expect(JSON.parse(next.sent[0]).request_id).not.toBe(JSON.parse(first.sent[0]).request_id)
+  })
+  it.each(['control_proposal', 'control_result', 'device_result', 'response'] as const)('does not expose a fresh %s device payload for a chat request', async (type) => {
+    capabilities.value.push('devices:control')
+    render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    const socket = await send()
+    const request = JSON.parse(socket.sent[0])
+    await act(async () => socket.receive({ type, session_id: 'one', request_id: request.request_id, content: '不应呈现的新设备回复', proposal: { ...controlProposal, request_id: request.request_id }, device_result: controlProposal.before }))
+    expect(screen.queryByRole('button', { name: '确认打开客厅主灯' })).toBeNull()
+    expect(screen.queryByText('不应呈现的新设备回复')).toBeNull()
+    expect(screen.getByRole('textbox', { name: '消息内容' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('发送结果尚不确定')
+    expect(FakeSocket.sockets).toHaveLength(1)
+  })
+  it('keeps recovered history text but suppresses an incompatible current-chat proposal and preserves older controls', async () => {
+    capabilities.value.push('devices:control')
+    const transport = vi.fn().mockImplementation(async (url: string) => reply({ ...controlProposal, id: url.endsWith('fresh') ? 'fresh' : 'p-one', request_id: url.endsWith('fresh') ? JSON.parse(socket.sent[0]).request_id : 'historical-auto' }))
+    vi.stubGlobal('fetch', transport)
+    render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    const socket = await send()
+    messages.mockResolvedValue({ id: 'one', messages: [
+      { role: 'assistant', content: '历史的合法提议', timestamp: '', attachments: [{ kind: 'control_proposal', proposal_id: 'p-one' }] },
+      { role: 'assistant', content: '当前请求的恢复文字', timestamp: '', attachments: [{ kind: 'control_proposal', proposal_id: 'fresh' }] },
+    ] })
+    await act(async () => socket.close())
+    expect(await screen.findByText('当前请求的恢复文字')).toBeVisible()
+    expect(await screen.findByText('此设备操作记录暂不可用。')).toBeVisible()
+    expect(screen.getAllByRole('button', { name: '确认打开客厅主灯' })).toHaveLength(1)
+    expect(transport.mock.calls.every(([, options]) => (options?.method ?? 'GET') === 'GET')).toBe(true)
+  })
+  it.each([
+    ['invalid_chat_entry', '不支持此聊天入口。'],
+    ['request_id_required', '普通聊天需要请求标识，请重新发起请求。'],
+    ['request_entry_conflict', '此请求的内容或入口与原请求不一致，请核对会话。'],
+    ['request_entry_limit', '当前会话已达到请求上限，请新建会话。'],
+  ])('shows safe %s guidance without automatically resending or changing session', async (code, guidance) => {
+    render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><LocationProbe /><ChatPage /></MemoryRouter>)
+    await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+    fireEvent.change(entry(), { target: { value: 'chat' } })
+    const socket = await send()
+    await act(async () => socket.receive({ type: 'error', outcome: 'failed', code, session_id: 'one', request_id: JSON.parse(socket.sent[0]).request_id, message: 'unsafe raw backend text' }))
+    expect(screen.getByRole('alert')).toHaveTextContent(guidance)
+    expect(screen.queryByText('unsafe raw backend text')).toBeNull()
+    expect(screen.getByTestId('location')).toHaveTextContent('sid=one')
+    expect(FakeSocket.sockets).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: '重试上一条' })).toBeNull()
+  })
+})
+
+
+it.each([
+  ['request_entry_limit', 'new'], ['request_entry_limit', 'identity'],
+  ['request_entry_conflict', 'new'], ['request_entry_conflict', 'identity'],
+])('blocks accidental sends after %s until explicit %s reset', async (code, reset) => {
+  const view = render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><LocationProbe /><ChatPage /></MemoryRouter>)
+  await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+  fireEvent.change(screen.getByRole('combobox', { name: '聊天入口' }), { target: { value: 'chat' } })
+  const input = screen.getByRole('textbox', { name: '消息内容' })
+  fireEvent.change(input, { target: { value: '不能替换请求' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]
+  await act(async () => socket.open())
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  const original = JSON.parse(socket.sent[0])
+  await act(async () => socket.receive({ type: 'error', outcome: 'failed', code, session_id: 'one', request_id: original.request_id }))
+  expect(input).toBeDisabled()
+  fireEvent.change(input, { target: { value: '不能替换请求' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(FakeSocket.sockets).toHaveLength(1)
+  expect(screen.getByTestId('location')).toHaveTextContent('sid=one')
+  if (reset === 'new') fireEvent.click(screen.getByRole('button', { name: '新对话' }))
+  else {
+    authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+    view.rerender(<MemoryRouter initialEntries={['/app/chat?sid=one']}><LocationProbe /><ChatPage /></MemoryRouter>)
+  }
+  expect(screen.getByRole('textbox', { name: '消息内容' })).toBeEnabled()
+  expect(screen.getByRole('combobox', { name: '聊天入口' })).toHaveValue('auto')
+  fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '重新开始' } })
+  await waitFor(() => expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled())
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const next = FakeSocket.sockets[1]
+  await act(async () => next.open())
+  await waitFor(() => expect(next.sent).toHaveLength(1))
+  expect(JSON.parse(next.sent[0])).toMatchObject({ entry: 'auto', content: '重新开始', session_id: reset === 'new' ? '' : 'one' })
+  expect(JSON.parse(next.sent[0]).request_id).not.toBe(original.request_id)
+})
+
+
+it('preserves the original retry entry and request ID after an unsent retry handshake fails', async () => {
+  render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><ChatPage /></MemoryRouter>)
+  await waitFor(() => expect(messages).toHaveBeenCalledTimes(1))
+  const entry = screen.getByRole('combobox', { name: '聊天入口' })
+  const input = screen.getByRole('textbox', { name: '消息内容' })
+  fireEvent.change(entry, { target: { value: 'chat' } })
+  fireEvent.change(input, { target: { value: '必须沿用原入口' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]
+  await act(async () => socket.open())
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  const original = JSON.parse(socket.sent[0])
+  await act(async () => socket.close())
+  fireEvent.click(await screen.findByRole('button', { name: '重试上一条' }))
+  fireEvent.change(entry, { target: { value: 'auto' } })
+  openChatSocket.mockRejectedValueOnce(new TypeError('offline handshake'))
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(await screen.findByText(/消息尚未发送，草稿已保留/)).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const retry = FakeSocket.sockets[1]
+  await act(async () => retry.open())
+  await waitFor(() => expect(retry.sent).toHaveLength(1))
+  expect(JSON.parse(retry.sent[0])).toEqual(original)
+})
+
+
+it.each([
+  ['request_entry_limit', '当前会话已达到请求上限，请新建会话。', 'new'],
+  ['request_entry_limit', '当前会话已达到请求上限，请新建会话。', 'identity'],
+  ['request_entry_conflict', '此请求的内容或入口与原请求不一致，请核对会话。', 'new'],
+  ['request_entry_conflict', '此请求的内容或入口与原请求不一致，请核对会话。', 'identity'],
+])('retains %s explanation after successful control-history recovery (%s; %s cleanup)', async (code, guidance, reset) => {
+  messages.mockResolvedValue(historyWithControl)
+  vi.mocked(fetch).mockImplementation(async () => reply({ ...controlProposal, status: 'executing' }))
+  const view = render(<MemoryRouter initialEntries={['/app/chat?sid=one']}><LocationProbe /><ChatPage /></MemoryRouter>)
+  await screen.findByText('正在执行，无法撤回')
+  await waitFor(() => expect(screen.getByRole('button', { name: '开始录音' })).toBeEnabled())
+  fireEvent.change(screen.getByRole('combobox', { name: '聊天入口' }), { target: { value: 'chat' } })
+  const input = screen.getByRole('textbox', { name: '消息内容' })
+  fireEvent.change(input, { target: { value: '执行期间的普通聊天' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const socket = FakeSocket.sockets[0]
+  await act(async () => socket.open())
+  await waitFor(() => expect(socket.sent).toHaveLength(1))
+  messages.mockResolvedValue({ id: 'one', messages: [{ ...historyWithControl.messages[0], content: '已重新读取的历史提议' }] })
+  vi.mocked(fetch).mockImplementation(async () => reply({ ...controlProposal, status: 'cancelled' }))
+  await act(async () => socket.receive({ type: 'error', outcome: 'failed', code, session_id: 'one', request_id: JSON.parse(socket.sent[0]).request_id }))
+  await screen.findByText('已重新读取的历史提议')
+  await screen.findByText('提议已取消')
+  expect(messages).toHaveBeenCalledTimes(2)
+  expect(screen.getByRole('alert')).toHaveTextContent(guidance)
+  expect(screen.getByRole('button', { name: '开始录音' })).toBeDisabled()
+  expect(input).toBeDisabled()
+  expect(screen.getByRole('combobox', { name: '聊天入口' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled()
+  fireEvent.change(input, { target: { value: '不能绕过阻断' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  expect(FakeSocket.sockets).toHaveLength(1)
+  expect(screen.getByTestId('location')).toHaveTextContent('sid=one')
+  if (reset === 'new') fireEvent.click(screen.getByRole('button', { name: '新对话' }))
+  else {
+    authSupport.epoch = 2; authSupport.userId = 'bob'; authSupport.isCurrent = (epoch) => epoch === 2
+    view.rerender(<MemoryRouter initialEntries={['/app/chat?sid=one']}><LocationProbe /><ChatPage /></MemoryRouter>)
+  }
+  await waitFor(() => expect(screen.getByRole('combobox', { name: '聊天入口' })).toBeEnabled())
+  expect(screen.queryByText(guidance)).toBeNull()
+  expect(screen.getByRole('button', { name: '开始录音' })).toBeEnabled()
+  expect(screen.getByRole('textbox', { name: '消息内容' })).toBeEnabled()
+  expect(screen.getByRole('combobox', { name: '聊天入口' })).toHaveValue('auto')
+  fireEvent.change(screen.getByRole('textbox', { name: '消息内容' }), { target: { value: '清理后正常发送' } })
+  expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled()
+})
+
+describe('context budget notice', () => {
+  it.each([undefined, 0, -1, 1.5, '2', 2])('shows only positive whole omitted pairs (%s)', async (pairs) => {
+    render(<MemoryRouter initialEntries={['/app/chat']}><ChatPage /></MemoryRouter>)
+    const input = screen.getByRole('textbox', { name: '消息内容' })
+    fireEvent.change(input, { target: { value: 'test budget' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    const socket = FakeSocket.sockets[0]; socket.open()
+    await waitFor(() => expect(socket.sent).toHaveLength(1))
+    const requestId = JSON.parse(socket.sent[0]).request_id
+    await act(async () => socket.receive({ type: 'session', session_id: 'budget', request_id: requestId }))
+    await act(async () => socket.receive({ type: 'response', session_id: 'other', request_id: requestId, content: 'stale', omitted_history_pairs: 3 }))
+    expect(screen.queryByText(/本轮未包含较早的/)).toBeNull()
+    await act(async () => socket.receive({ type: 'response', session_id: 'budget', request_id: requestId, content: 'budget answer', omitted_history_pairs: pairs }))
+    expect(screen.getByText('budget answer')).toBeVisible()
+    if (pairs === 2) expect(screen.getByText('本轮未包含较早的 2 轮对话')).toBeVisible()
+    else expect(screen.queryByText(/本轮未包含较早的/)).toBeNull()
+    fireEvent.change(input, { target: { value: 'next turn' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    expect(screen.queryByText(/本轮未包含较早的/)).toBeNull()
+  })
 })

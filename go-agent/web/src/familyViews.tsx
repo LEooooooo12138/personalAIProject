@@ -1,6 +1,8 @@
+import { formatEntityState } from './entityState'
 import { Link } from 'react-router-dom'
 import { ApiError, errorText, type CatalogMeta, type DeviceView, type EntityView } from './api'
-import { Icon } from './icons'
+import { ActionGroup, Alert, Breadcrumb, Button, Card, Disclosure, Icon, KeyValueList, ListRow, LoadingState, Metric, Stack, StatusBadge } from './ui'
+import './styles/family.css'
 
 export function dateLabel(value: string | null): string {
   if (!value) return '暂无记录'
@@ -16,41 +18,25 @@ export function haStatusText(meta: CatalogMeta, failed = false) {
 }
 export function domainLabel(domain: string) { const names: Record<string, string> = { light: '灯', switch: '开关', fan: '风扇', binary_sensor: '二值传感器', sensor: '传感器', cover: '窗帘', climate: '温控', scene: '场景', group: '实体分组', person: '人员状态', device_tracker: '设备追踪', input_boolean: '布尔辅助项', automation: '自动化' }; return names[domain] ? `${names[domain]}（${domain}）` : domain }
 export function FamilyStatus({ meta, failed = false, reload }: { meta: CatalogMeta; failed?: boolean; reload: () => void }) {
-  const stale = failed || meta.freshness === 'stale'
-  return <section className={`family-status ${stale || meta.connection === 'unavailable' ? 'family-status-warning' : ''}`} aria-label="HA 与目录状态">
-    <div className="family-status-head"><strong><span className={`service-dot ${!failed && meta.connection === 'connected' ? 'connected' : 'unavailable'}`}/>{haStatusText(meta, failed)}</strong><button className="text-button" onClick={reload}>重新检查</button></div>
-    {stale ? <p className="stale-note" role="status">正在显示旧数据</p> : meta.freshness === 'unknown' ? <p className="stale-note">尚无完整目录</p> : null}
-    <div className="catalog-times"><span>数据时间 <time>{dateLabel(meta.observed_at)}</time></span><span>检查时间 <time>{dateLabel(meta.last_attempt_at)}</time></span><span>最近成功 <time>{dateLabel(meta.last_success_at)}</time></span></div>
-  </section>
+ const stale = failed || meta.freshness === 'stale'
+ return <section aria-label="HA 与目录状态"><Alert tone={stale || meta.connection === 'unavailable' ? 'warning' : 'info'} title={haStatusText(meta, failed)} actions={<Button variant="secondary" onClick={reload}>重新检查</Button>}><Stack gap={12}>
+  {stale ? <p role="status">正在显示旧数据</p> : meta.freshness === 'unknown' ? <p>尚无完整目录</p> : null}
+  <KeyValueList items={[{id:'observed',label:'数据时间',value:<time>{dateLabel(meta.observed_at)}</time>},{id:'attempt',label:'检查时间',value:<time>{dateLabel(meta.last_attempt_at)}</time>},{id:'success',label:'最近成功',value:<time>{dateLabel(meta.last_success_at)}</time>}]}/>
+ </Stack></Alert></section>
 }
-export function FamilyPending() { return <div className="empty-card" role="status"><span className="loader"/>正在读取家庭目录…</div> }
-export function FamilyFailure({ error, reload }: { error: ApiError | null; reload: () => void }) {
-  return <div className="empty-card error-state" role="alert"><strong>{error?.status === 404 ? '未找到这个区域或设备。' : '家庭目录暂时不可用。'}</strong><p>{error ? errorText(error) : '请稍后重新加载。'}</p><button className="button button-secondary" onClick={reload}>重新加载</button></div>
-}
-export function FamilyBreadcrumb({ area, device }: { area?: { id: string; name: string }; device?: string }) {
-  return <nav className="family-breadcrumb" aria-label="页面路径"><Link to="/app/areas">全部区域</Link>{area && <><Icon name="chevron" size={15}/>{device ? <Link to={areaPath(area.id)}>{area.name}</Link> : <span aria-current="page">{area.name}</span>}</>}{device && <><Icon name="chevron" size={15}/><span aria-current="page">{device}</span></>}</nav>
-}
+export function FamilyPending() { return <LoadingState label="正在读取家庭目录…"/> }
+export function FamilyFailure({ error, reload }: { error: ApiError | null; reload: () => void }) {return <Alert tone="danger" live="assertive" title={error?.status === 404 ? '未找到这个区域或设备。' : '家庭目录暂时不可用。'} actions={<Button variant="secondary" onClick={reload}>重新加载</Button>}>{error ? errorText(error) : '请稍后重新加载。'}</Alert>}
+export function FamilyBreadcrumb({ area, device }: { area?: { id: string; name: string }; device?: string }) {return <Breadcrumb label="页面路径"><Link to="/app/areas">全部区域</Link>{area && <><Icon name="chevron" size={16}/>{device ? <Link to={areaPath(area.id)}>{area.name}</Link> : <span aria-current="page">{area.name}</span>}</>}{device && <><Icon name="chevron" size={16}/><span aria-current="page">{device}</span></>}</Breadcrumb>}
+
 export function membershipLabel(device: DeviceView) {
   return device.membership === 'entity' ? '实体覆盖到此区域' : device.membership === 'both' ? '直接归属与实体关系' : '直接归属此区域'
 }
-export function DeviceCard({ device, areaId }: { device: DeviceView; areaId: string }) {
-  return <Link className="device-card" to={devicePath(areaId, device.id)}><span className="device-card-icon"><Icon name={device.kind === 'device' ? 'device' : 'sensor'} size={23}/></span><div className="device-card-main"><h3>{device.name}</h3><p>{device.kind === 'device' ? '设备注册项' : '独立实体'} · {device.entity_count} 个实体</p><span className="membership-tag">{membershipLabel(device)}</span>{device.entity_count === 0 && <small>此区域无该设备的实体</small>}</div><Icon name="chevron" size={19}/></Link>
-}
+export function DeviceCard({ device, areaId }: { device: DeviceView; areaId: string }) {return <Link className="jx-family-device-link" to={devicePath(areaId, device.id)}><ListRow leading={<Icon name={device.kind === 'device' ? 'device' : 'sensor'} size={24}/>} title={<h3>{device.name}</h3>} description={`${device.kind === 'device' ? '设备注册项' : '独立实体'} · ${device.entity_count} 个实体`} meta={<><StatusBadge tone="neutral" label={membershipLabel(device)}/>{device.entity_count === 0 && <p className="jx-muted">此区域无该设备的实体</p>}</>} trailing={<Icon name="chevron"/>}/></Link>}
+
 export function entityStateLabel(entity: EntityView) {
-  const state = entity.state
-  if (state === null) return '暂无状态'
-  if (state === 'unavailable') return '不可用'
-  if (state === 'unknown') return '状态未知'
-  if (state !== 'on' && state !== 'off') return state
-  const active = state === 'on'
-  if (['light', 'switch', 'fan', 'input_boolean'].includes(entity.domain)) return active ? '开启' : '关闭'
-  if (entity.domain === 'binary_sensor') {
-    if (['door', 'window', 'opening'].includes(entity.device_class ?? '')) return active ? '打开' : '关闭'
-    if (entity.device_class === 'tamper') return active ? '检测到防拆' : '未检测到防拆'
-    if (['motion', 'occupancy', 'presence'].includes(entity.device_class ?? '')) return active ? '检测到' : '未检测到'
-  }
-  return state
+  return formatEntityState(entity)
 }
 export function EntityCard({ entity }: { entity: EntityView }) {
-  return <article className="entity-card"><div className="entity-heading"><h3>{entity.name}</h3><span className="domain-tag">{domainLabel(entity.domain)}</span></div><div className="entity-state"><strong>{entityStateLabel(entity)}</strong>{entity.state !== null && entity.state !== 'unavailable' && entity.state !== 'unknown' && entity.unit !== null && <span>{entity.unit}</span>}</div><div className="entity-flags">{entity.disabled && <span>已禁用</span>}{entity.hidden && <span>已隐藏</span>}</div><dl><div><dt>状态变化</dt><dd><time>{dateLabel(entity.last_changed)}</time></dd></div><div><dt>最近更新</dt><dd><time>{dateLabel(entity.last_updated)}</time></dd></div></dl><details className="entity-technical"><summary>技术详情</summary><p><code>{entity.entity_id}</code></p><p>原始状态：{entity.state ?? 'null'}</p><p>类别：{entity.device_class ?? '暂无类别'}</p></details></article>
+ const unit = entity.state !== null && entity.state !== 'unavailable' && entity.state !== 'unknown' && entity.unit !== null ? entity.unit : undefined
+ return <div className="jx-family-entity"><Card heading={entity.name}><Stack><StatusBadge tone="neutral" label={domainLabel(entity.domain)}/><Metric label="当前状态" value={entityStateLabel(entity)} unit={unit}/><ActionGroup>{entity.disabled && <StatusBadge tone="neutral" label="已禁用"/>}{entity.hidden && <StatusBadge tone="neutral" label="已隐藏"/>}</ActionGroup><KeyValueList items={[{id:'changed',label:'状态变化',value:<time>{dateLabel(entity.last_changed)}</time>},{id:'updated',label:'最近更新',value:<time>{dateLabel(entity.last_updated)}</time>}]}/><Disclosure title="技术详情"><Stack gap={12}><code>{entity.entity_id}</code><p>原始状态：{entity.state ?? 'null'}</p><p>类别：{entity.device_class ?? '暂无类别'}</p></Stack></Disclosure></Stack></Card></div>
 }

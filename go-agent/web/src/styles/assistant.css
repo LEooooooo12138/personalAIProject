@@ -1,0 +1,4 @@
+@layer jx-features {
+ .jx-assistant-mode {padding:var(--jx-space-16);border-left:3px solid var(--jx-color-brand);background:var(--jx-color-surface-subtle);border-radius:var(--jx-radius-control);min-width:0}
+ .jx-assistant-mode h3 {margin-bottom:var(--jx-space-16)}.jx-assistant-endpoint {font-size:var(--jx-font-small);color:var(--jx-color-text-muted);overflow-wrap:anywhere;margin:0}
+}

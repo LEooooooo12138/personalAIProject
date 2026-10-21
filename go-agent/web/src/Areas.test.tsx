@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
@@ -62,10 +63,10 @@ describe('family directory pages', () => {
     }); show(); await screen.findByRole('heading', { name: '家庭区域' })
     // Drain this immediate mock response and React's route/query effects before
     // asserting results; the heading alone only proves the page has mounted.
-    await act(async () => {
-      fireEvent.change(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), { target: { value: 'switch.channel_1' } })
-      fireEvent.click(screen.getByRole('button', { name: '搜索' }))
-    })
+    const user = userEvent.setup()
+    await user.type(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), 'switch.channel_1')
+    await user.click(screen.getByRole('button', { name: '搜索' }))
+    await screen.findByRole('link', { name: /客厅三路开关/ })
     expect(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' })).toHaveValue('switch.channel_1')
     expect(screen.getByRole('link', { name: /客厅三路开关/ })).toBeInTheDocument(); expect(screen.getByText('2 个设备注册项')).toBeInTheDocument(); expect(screen.getByText('匹配 1 个区域')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /其他.*设备注册项/ })).not.toBeInTheDocument()
@@ -212,22 +213,25 @@ it('synchronizes the search draft and actual results when router history moves b
     return json({ ...areas, areas: [{ ...areas.areas[0], name: query ? `RESULT-${query}` : '客厅' }] })
   })
   render(<MemoryRouter initialEntries={['/app/areas']}><HistoryNavigation/><App/></MemoryRouter>)
-  const search = await screen.findByRole('searchbox', { name: '搜索区域、设备或实体' })
-  fireEvent.change(search, { target: { value: 'A' } }); fireEvent.click(screen.getByRole('button', { name: /^搜索$/ }))
+  // This history test starts with a loaded directory; the next test covers a pending initial read.
+  await screen.findByRole('link', { name: /客厅.*设备注册项/ })
+  const user = userEvent.setup()
+  const search = screen.getByRole('searchbox', { name: '搜索区域、设备或实体' })
+  await user.type(search, 'A'); await user.click(screen.getByRole('button', { name: /^搜索$/ }))
   await screen.findByRole('link', { name: /RESULT-A/ })
-  fireEvent.change(search, { target: { value: 'B' } }); fireEvent.click(screen.getByRole('button', { name: /^搜索$/ }))
+  await user.clear(search); await user.type(search, 'B'); await user.click(screen.getByRole('button', { name: /^搜索$/ }))
   await screen.findByRole('link', { name: /RESULT-B/ })
-  fireEvent.click(screen.getByRole('button', { name: '测试历史返回' }))
+  await user.click(screen.getByRole('button', { name: '测试历史返回' }))
   await screen.findByRole('link', { name: /RESULT-A/ })
   expect(screen.getByLabelText('测试搜索位置')).toHaveTextContent('/app/areas?q=A')
   expect(search).toHaveValue('A')
-  fireEvent.click(screen.getByRole('button', { name: '测试历史前进' }))
+  await user.click(screen.getByRole('button', { name: '测试历史前进' }))
   await screen.findByRole('link', { name: /RESULT-B/ })
   expect(screen.getByLabelText('测试搜索位置')).toHaveTextContent('/app/areas?q=B')
   expect(search).toHaveValue('B')
-  fireEvent.click(screen.getByRole('button', { name: '测试历史返回' }))
+  await user.click(screen.getByRole('button', { name: '测试历史返回' }))
   await screen.findByRole('link', { name: /RESULT-A/ })
-  fireEvent.click(screen.getByRole('button', { name: /^搜索$/ }))
+  await user.click(screen.getByRole('button', { name: /^搜索$/ }))
   expect(search).toHaveValue('A')
   expect(screen.getByLabelText('测试搜索位置')).toHaveTextContent('/app/areas?q=A')
   expect(screen.queryByRole('link', { name: /RESULT-B/ })).not.toBeInTheDocument()
@@ -244,8 +248,9 @@ it('keeps a submitted area search authoritative while the initial directory load
   })
   show()
   await screen.findByText('正在读取家庭目录…')
-  fireEvent.change(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), { target: { value: 'switch.channel_1' } })
-  fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+  const user = userEvent.setup()
+  await user.type(screen.getByRole('searchbox', { name: '搜索区域、设备或实体' }), 'switch.channel_1')
+  await user.click(screen.getByRole('button', { name: '搜索' }))
   await screen.findByRole('link', { name: /客厅三路开关/ })
   expect(calls).toEqual(['/api/console/v1/areas', '/api/console/v1/areas?q=switch.channel_1'])
   await act(async () => release(json(areas)))
