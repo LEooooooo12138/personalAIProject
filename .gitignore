@@ -34,3 +34,31 @@ go-agent/config/agent.yaml
 /.env.*
 !/.env.example
 /go-agent/tools/ha_*.py
+/go-agent/.tmp/
+
+# Private local evidence, generated captures, and workstation migration notes
+/.tmp/
+/docs/assets/
+/docs/model-connection-followup-*.md
+/docs/automation-completion-validation.md
+/docs/project-dependencies.md
+/docs/cloud-latency-investigation-*.md
+/docs/production-deployment-*.md
+/docs/current-version-audit-*.md
+/docs/four-audit-fixes-*.md
+/docs/implementation-decisions-*.md
+/docs/implementation-status-*.md
+/docs/superpowers/plans/*-dependencies-to-e.md
+/docs/superpowers/plans/*-cloud-automation-resume.md
+/docs/superpowers/plans/*-production-deployment-and-ha-acceptance.md
+/docs/superpowers/specs/*-validation.md
+/docs/superpowers/specs/*-persona-butler-fusion-assessment.md
+/scripts/Use-ProjectDependencies.ps1
+
+# Household mappings and raw provider / Home Assistant responses
+/docs/console-ha-device-mapping.md
+/docs/console-ha-*.json
+
+/docs/console-ha-live-acceptance.md
+/docs/family-areas-live-results-2026-10-08.md
+/docs/ha-browser-verification-2026-09-29.md
