@@ -1,0 +1,2 @@
+import type { ReactNode } from 'react'
+export function PageHeader({ title, description, leading, actions }: { title: string; description?: ReactNode; leading?: ReactNode; actions?: ReactNode }) { return <header data-jx-ui="" className="jx-page-header">{leading}<div className="jx-page-heading"><h1>{title}</h1>{description && <div className="jx-muted">{description}</div>}</div>{actions && <div className="jx-page-actions">{actions}</div>}</header> }

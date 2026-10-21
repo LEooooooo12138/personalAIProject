@@ -1,0 +1,18 @@
+@layer jx-ui {
+ .jx-icon {display:inline-block;flex:none;vertical-align:middle}
+ .jx-button,.jx-action-link {display:inline-flex;align-items:center;justify-content:center;gap:var(--jx-space-8);min-height:var(--jx-button-height);min-width:44px;max-width:100%;padding:10px 16px;border:1px solid var(--jx-color-brand);border-radius:var(--jx-button-radius);font-size:var(--jx-font-body);font-weight:600;line-height:var(--jx-font-line-control);text-align:center;text-decoration:none;cursor:pointer;transition:background var(--jx-motion-fast),border-color var(--jx-motion-fast)}
+ .jx-button-primary {color:var(--jx-color-on-brand);background:var(--jx-button-background)}
+ .jx-button-primary:not(:disabled):hover {background:var(--jx-color-brand-hover)}
+ .jx-button-secondary {background:var(--jx-color-surface);color:var(--jx-color-brand);border-color:var(--jx-color-field-border)}
+ .jx-button-secondary:not(:disabled):hover,.jx-button-ghost:not(:disabled):hover {background:var(--jx-color-selected)}
+ .jx-button-ghost {background:transparent;color:var(--jx-color-brand);border-color:transparent}
+ .jx-button-danger {background:var(--jx-color-danger);color:var(--jx-color-on-brand);border-color:var(--jx-color-danger)}
+ .jx-button-danger:not(:disabled):hover {background:var(--jx-color-danger-bg);color:var(--jx-color-danger)}
+ .jx-button:disabled {cursor:not-allowed;color:var(--jx-color-text-muted);background:var(--jx-color-surface-subtle);border-color:var(--jx-color-border)}
+ .jx-button[aria-busy=true] {cursor:wait;border-style:dashed}
+ .jx-button-comfortable {min-height:var(--jx-button-height-comfortable)}
+ .jx-icon-button {padding:10px;min-width:44px;min-height:44px}
+ .jx-avatar {display:inline-grid;place-items:center;flex:none;width:44px;height:44px;border-radius:var(--jx-radius-pill);background:var(--jx-color-selected);color:var(--jx-color-brand);font-weight:600}
+ .jx-avatar-large {width:64px;height:64px;font-size:var(--jx-font-section)}
+ @media(prefers-reduced-motion:reduce) {.jx-button,.jx-action-link {transition:none}.jx-spinner {animation:none}}
+}

@@ -1,0 +1,2 @@
+import type { ReactNode } from 'react'
+export function AuthFrame({brand,title,description,children,footer}:{brand:ReactNode;title:string;description?:ReactNode;children:ReactNode;footer?:ReactNode}){return <main data-jx-ui="" className="jx-auth-frame"><div className="jx-auth-surface">{brand}<header><h1>{title}</h1>{description && <div className="jx-muted">{description}</div>}</header>{children}{footer && <footer>{footer}</footer>}</div></main>}

@@ -16,6 +16,6 @@ export default defineConfig(({ mode }) => {
     base: '/app/', plugins: [react()],
     server: { proxy },
     build: { outDir: '../static/console', emptyOutDir: true },
-    test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], css: true, exclude: ['e2e/**', 'node_modules/**'] },
+    test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], css: true, exclude: ['e2e/**', 'ui-e2e/**', 'scripts/**', 'node_modules/**'] },
   }
 })

@@ -1,0 +1,17 @@
+@layer jx-reset {
+ *,*::before,*::after {box-sizing:border-box}
+ html {font-size:16px; font-family:var(--jx-font-family); line-height:var(--jx-font-line-body); color:var(--jx-color-text); background:var(--jx-color-canvas);font-synthesis:none;text-rendering:optimizeLegibility}
+ body {margin:0;min-width:0} #root {min-height:100dvh}
+ [hidden] {display:none!important}
+ :where([data-jx-ui]:not(svg)) {font-family:var(--jx-font-family);font-size:var(--jx-font-body);line-height:var(--jx-font-line-body);color:var(--jx-color-text);overflow-wrap:anywhere}
+ :where([data-jx-ui]) :where(h1,h2,h3,p,dl,ol) {margin-block-start:0}
+ :where([data-jx-ui]) :where(h1,h2,h3) {font-weight:var(--jx-font-weight-strong);line-height:1.35;letter-spacing:normal;color:inherit}
+ :where([data-jx-ui]) :where(h1) {font-size:var(--jx-font-title)}
+ :where([data-jx-ui]) :where(h2) {font-size:var(--jx-font-section)}
+ :where([data-jx-ui]) :where(h3) {font-size:var(--jx-font-subtitle)}
+ :where([data-jx-ui]) :where(p) {line-height:var(--jx-font-line-body)}
+ :where([data-jx-ui]) :where(a) {color:var(--jx-color-brand);text-underline-offset:3px}
+ :where([data-jx-ui]) :where(button,input,select,textarea) {font:inherit}
+ :where([data-jx-ui]):focus-visible, :where([data-jx-ui]) :where(button,a,input,textarea,select,summary,[tabindex]):focus-visible {outline:2px solid var(--jx-color-focus);outline-offset:2px}
+ :where([data-jx-ui]) :where(button,input,select,textarea,a,summary) {touch-action:manipulation}
+}

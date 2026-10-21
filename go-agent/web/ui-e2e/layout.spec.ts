@@ -1,0 +1,5 @@
+import { test, expect } from '@playwright/test'
+for(const width of [320,390,759,760,761,768,1440]) test(`shell landmarks and long content at ${width}px and 200% type`,async({page})=>{
+ await page.setViewportSize({width,height:900});await page.goto('/app/catalog/index.html?case=layout');await expect(page.getByRole('main')).toHaveCount(1);await expect(page.getByRole('navigation',{name:width<=760?'手机导航':'主导航'})).toBeVisible();await expect(page.getByRole('navigation',{name:width<=760?'主导航':'手机导航'})).toBeHidden();for(const enlarged of [false,true]){if(enlarged)await page.addStyleTag({content:'html{font-size:32px}'});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);await expect(page.getByRole('button',{name:'主要操作'})).toBeVisible()}
+})
+test('auth frame owns a single main with no nested page frame',async({page})=>{await page.goto('/app/catalog/index.html?case=auth');await expect(page.getByRole('main')).toHaveCount(1);await expect(page.getByRole('heading',{name:'登录示例'})).toBeVisible()})

@@ -1,0 +1,1 @@
+export function LoadingState({ label, live = true }: { label: string; live?: boolean }) { return <div data-jx-ui="" className="jx-loading" role={live ? 'status' : undefined}><span className="jx-spinner" aria-hidden="true" />{label}</div> }

@@ -1,0 +1,4 @@
+import { test, expect } from '@playwright/test'
+test('native keyboard and real form activation retain safe types', async ({page})=>{
+ await page.goto('/app/catalog/index.html?case=controls'); await page.getByRole('button',{name:'默认按钮'}).click(); await expect(page.getByTestId('submit-count')).toHaveText('提交次数：0'); await page.getByRole('button',{name:'显式提交'}).click(); await expect(page.getByTestId('submit-count')).toHaveText('提交次数：1'); await expect(page.getByRole('button',{name:'保存中'})).toBeDisabled(); await expect(page.getByRole('button',{name:'禁用按钮'})).toBeDisabled(); const focus=page.getByRole('button',{name:'默认按钮'}); await focus.focus(); await page.keyboard.press('Tab'); await expect(page.getByRole('button',{name:'显式提交'})).toBeFocused(); await expect(page.getByRole('button',{name:'显式提交'})).toHaveCSS('outline-width','2px'); const size=await focus.boundingBox(); expect(size!.height).toBeGreaterThanOrEqual(44)
+})

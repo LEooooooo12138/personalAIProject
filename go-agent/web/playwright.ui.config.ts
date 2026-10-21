@@ -1,0 +1,2 @@
+import { defineConfig, devices } from '@playwright/test'
+export default defineConfig({ testDir: './ui-e2e', timeout: 30000, expect: { timeout: 8000 }, workers: 1, retries: 0, reporter: 'list', use: { ...devices['Desktop Chrome'], channel: process.env.CONSOLE_BROWSER_CHANNEL || undefined, baseURL: 'http://127.0.0.1:18082', trace: 'retain-on-failure' }, webServer: { command: 'npm run ui:catalog', url: 'http://127.0.0.1:18082/app/catalog/index.html', reuseExistingServer: false, timeout: 30000 } })

@@ -1,0 +1,13 @@
+@layer jx-tokens {
+ :root {
+  --jx-palette-white:#FFFFFF; --jx-palette-canvas:#F6F8F5; --jx-palette-subtle:#EEF3EF; --jx-palette-ink:#20352F; --jx-palette-muted:#53655E; --jx-palette-green:#176B5B; --jx-palette-green-dark:#125748; --jx-palette-selected:#E9F3EE; --jx-palette-border:#D7E1DB; --jx-palette-field:#71867B;
+  --jx-palette-warning:#7A4C00; --jx-palette-warning-bg:#FFF5DB; --jx-palette-danger:#9F2D2D; --jx-palette-danger-bg:#FFF1F0; --jx-palette-info:#245D83; --jx-palette-info-bg:#EEF6FC;
+  --jx-space-4:4px; --jx-space-8:8px; --jx-space-12:12px; --jx-space-16:16px; --jx-space-24:24px; --jx-space-32:32px; --jx-space-48:48px;
+  --jx-radius-control:8px; --jx-radius-card:12px; --jx-radius-surface:20px; --jx-radius-pill:999px;
+  --jx-color-canvas:var(--jx-palette-canvas); --jx-color-surface:var(--jx-palette-white); --jx-color-surface-subtle:var(--jx-palette-subtle); --jx-color-text:var(--jx-palette-ink); --jx-color-text-muted:var(--jx-palette-muted); --jx-color-brand:var(--jx-palette-green); --jx-color-brand-hover:var(--jx-palette-green-dark); --jx-color-on-brand:var(--jx-palette-white); --jx-color-selected:var(--jx-palette-selected); --jx-color-border:var(--jx-palette-border); --jx-color-field-border:var(--jx-palette-field); --jx-color-focus:var(--jx-palette-green);
+  --jx-color-warning:var(--jx-palette-warning); --jx-color-warning-bg:var(--jx-palette-warning-bg); --jx-color-danger:var(--jx-palette-danger); --jx-color-danger-bg:var(--jx-palette-danger-bg); --jx-color-info:var(--jx-palette-info); --jx-color-info-bg:var(--jx-palette-info-bg); --jx-color-success:var(--jx-palette-green); --jx-color-success-bg:var(--jx-palette-selected);
+  --jx-font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif; --jx-font-small:.875rem; --jx-font-body:1rem; --jx-font-subtitle:1.25rem; --jx-font-section:1.5rem; --jx-font-title:1.875rem; --jx-font-metric:2.25rem; --jx-font-weight-regular:400; --jx-font-weight-medium:500; --jx-font-weight-strong:600; --jx-font-line-body:1.6; --jx-font-line-control:1.4;
+  --jx-button-height:44px; --jx-button-height-comfortable:48px; --jx-button-radius:var(--jx-radius-control); --jx-button-background:var(--jx-color-brand); --jx-field-height:44px; --jx-field-border:var(--jx-color-field-border); --jx-field-radius:var(--jx-radius-control); --jx-card-radius:var(--jx-radius-card); --jx-card-background:var(--jx-color-surface);
+  --jx-motion-fast:120ms; --jx-motion-normal:180ms; --jx-dialog-shadow:0 16px 48px #20352F26;
+ }
+}

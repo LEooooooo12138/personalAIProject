@@ -3,13 +3,19 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": "^24.15.0 || >=26.0.0" },
+  "engines": {
+    "node": "^24.15.0 || >=26.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test",
-    "build": "npm run typecheck && vite build"
+    "test:e2e": "node scripts/run-console-e2e.mjs",
+    "build": "npm run typecheck && vite build",
+    "ui:catalog": "vite --host 127.0.0.1 --port 18082 --strictPort",
+    "test:ui": "playwright test --config playwright.ui.config.ts",
+    "check:ui-boundaries": "node scripts/check-ui-boundaries.mjs",
+    "pretest:e2e": "node scripts/build-consolefixture.mjs"
   },
   "dependencies": {
     "react": "19.3.0",

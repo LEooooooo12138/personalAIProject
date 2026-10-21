@@ -1,0 +1,2 @@
+import type { ReactNode } from 'react'
+export function ListRow({leading,title,description,meta,trailing}:{leading?:ReactNode;title:ReactNode;description?:ReactNode;meta?:ReactNode;trailing?:ReactNode}){return <div data-jx-ui="" className="jx-list-row">{leading && <div className="jx-list-leading">{leading}</div>}<div className="jx-list-content"><div className="jx-list-title">{title}</div>{description && <div className="jx-muted">{description}</div>}{meta && <div className="jx-list-meta">{meta}</div>}</div>{trailing && <div className="jx-list-trailing">{trailing}</div>}</div>}

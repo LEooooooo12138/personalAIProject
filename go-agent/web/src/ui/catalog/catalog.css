@@ -1,0 +1,12 @@
+@layer jx-features {
+ .jx-catalog-menu {display:flex;flex-wrap:wrap;gap:12px;padding:16px;border-bottom:1px solid var(--jx-color-border);background:var(--jx-color-surface)}
+ .jx-catalog-menu a {color:var(--jx-color-brand);min-height:44px;display:inline-flex;align-items:center;text-decoration:underline;text-underline-offset:3px}
+ .jx-catalog-content {max-width:1120px;margin:auto;padding:24px 16px;container-type:inline-size}
+ .jx-catalog-content>h1 {font-size:var(--jx-font-title);line-height:1.35}
+ .jx-catalog-list {list-style:none;padding:0;margin:0}.jx-catalog-list>li {border-bottom:1px solid var(--jx-color-border)}
+ .jx-catalog-list>li>a {display:block;color:var(--jx-color-brand);text-decoration:none}
+ .jx-catalog-colors {display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:16px}
+ .jx-catalog-swatch {height:56px;border:1px solid var(--jx-color-field-border);border-radius:var(--jx-radius-control)}
+ .jx-catalog-fieldset {border:1px solid var(--jx-color-border);border-radius:var(--jx-radius-control);padding:16px;min-width:0;margin:0}
+ .jx-catalog-long {overflow-wrap:anywhere}
+}

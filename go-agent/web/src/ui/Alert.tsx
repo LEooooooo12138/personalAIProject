@@ -1,0 +1,2 @@
+import type { ReactNode } from 'react'
+export function Alert({ tone, title, children, actions, live = false }: { tone: 'info' | 'warning' | 'danger'; title?: string; children: ReactNode; actions?: ReactNode; live?: false | 'polite' | 'assertive' }) { return <div data-jx-ui="" className={`jx-alert jx-tone-${tone}`} role={live === 'assertive' ? 'alert' : live === 'polite' ? 'status' : undefined}>{title && <strong>{title}</strong>}<div>{children}</div>{actions && <div className="jx-alert-actions">{actions}</div>}</div> }

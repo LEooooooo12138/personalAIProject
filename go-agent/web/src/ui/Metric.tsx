@@ -1,0 +1,2 @@
+import type { ReactNode } from 'react'
+export function Metric({ label, value, unit, description }: { label: string; value: string | number | null; unit?: string; description?: ReactNode }) { return <div data-jx-ui="" className="jx-metric"><div className="jx-muted">{label}</div><div className="jx-metric-value">{value === null ? <span className="jx-metric-missing">暂无数据</span> : <>{value}{unit && <span className="jx-metric-unit">{unit}</span>}</>}</div>{description && <div className="jx-muted">{description}</div>}</div> }

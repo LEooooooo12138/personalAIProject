@@ -1,0 +1,2 @@
+import { useId, type ReactNode } from 'react'
+export function Section({ title, description, actions, children }: { title?: string; description?: ReactNode; actions?: ReactNode; children: ReactNode }) {const id=useId();return <section data-jx-ui="" className="jx-section" aria-labelledby={title ? id : undefined}>{(title || description || actions) && <header className="jx-section-header"><div>{title && <h2 id={id}>{title}</h2>}{description && <div className="jx-muted">{description}</div>}</div>{actions}</header>}{children}</section>}
