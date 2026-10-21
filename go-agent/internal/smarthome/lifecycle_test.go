@@ -89,7 +89,7 @@ func TestRuleDocumentPreservesFrontmatterStrings(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(parts[1]), &metadata); err != nil {
 		t.Fatalf("invalid frontmatter: %v", err)
 	}
-	for key, want := range map[string]string{"title": s.Title, "trigger": s.Trigger, "action": s.Action, "data_source": s.DataSource, "status": "active"} {
+	for key, want := range map[string]string{"title": s.Title, "trigger": s.Trigger, "action": s.Action, "data_source": s.DataSource, "status": "installed"} {
 		if metadata[key] != want {
 			t.Errorf("%s=%q want %q", key, metadata[key], want)
 		}

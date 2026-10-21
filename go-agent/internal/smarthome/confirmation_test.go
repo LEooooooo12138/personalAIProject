@@ -23,9 +23,9 @@ type suggestionConfirmer interface {
 
 func confirmationManager(t *testing.T, handler http.HandlerFunc) (*Manager, suggestionConfirmer, string) {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(installationProofHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/config" {
-			_, _ = w.Write([]byte(`{"time_zone":"UTC"}`))
+			_, _ = w.Write([]byte(`{"time_zone":"UTC","version":"2026.7.2","components":["automation","config"]}`))
 			return
 		}
 		handler(w, r)
@@ -117,39 +117,25 @@ func TestIgnoredSuggestionCannotBeConfirmed(t *testing.T) {
 	}
 }
 
-func TestConfirmationFailureIsPersistedAndCanBeRetried(t *testing.T) {
-	var fail atomic.Bool
-	fail.Store(true)
+func TestConfirmationAmbiguityIsPersistedWithoutRetry(t *testing.T) {
 	var calls atomic.Int32
-	m, api, _ := confirmationManager(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		if fail.Load() {
-			w.WriteHeader(503)
-		}
-		_, _ = w.Write([]byte(`{}`))
-	})
-	if _, err := api.ConfirmSuggestion(context.Background(), "rule-kitchen"); err == nil {
-		t.Error("HA failure was hidden")
-	} else if !errors.Is(err, ErrHARequest) {
-		t.Errorf("wrong upstream sentinel: %v", err)
-	}
-	stored, err := m.store.GetSuggestions()
-	if err != nil || len(stored) != 1 || stored[0].Status != "failed" || stored[0].LastError == "" {
-		t.Fatalf("failed state=%#v %v", stored, err)
-	}
-	if _, err := api.IgnoreSuggestion("rule-kitchen"); !errors.Is(err, ErrSuggestionConflict) {
-		t.Fatalf("uncertain HA outcome can be ignored: %v", err)
-	}
-	fail.Store(false)
+	m, api, _ := confirmationManager(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(503) })
 	s, err := api.ConfirmSuggestion(context.Background(), "rule-kitchen")
-	if err != nil || s.Status != "confirmed" || s.LastError != "" {
-		t.Fatalf("retry=%#v %v", s, err)
+	if err != nil || s.Status != "unknown" || s.LastError == "" {
+		t.Fatalf("ambiguous outcome=%+v %v", s, err)
 	}
-	if calls.Load() != 3 {
-		t.Errorf("requests=%d", calls.Load())
+	if _, err = api.IgnoreSuggestion(s.ID); !errors.Is(err, ErrSuggestionConflict) {
+		t.Fatalf("uncertain outcome ignored: %v", err)
+	}
+	op, err := m.GetInstallOperationForSuggestion(s.ID)
+	if err != nil || op.Status != "unknown" {
+		t.Fatalf("operation=%+v %v", op, err)
+	}
+	s, err = api.ConfirmSuggestion(context.Background(), s.ID)
+	if err != nil || s.Status != "unknown" || calls.Load() != 1 {
+		t.Fatalf("unknown replay=%+v %v calls=%d", s, err, calls.Load())
 	}
 }
-
 func TestAutomationRejectsUnknownFieldsInsteadOfDroppingConstraints(t *testing.T) {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(executableSuggestion), &data); err != nil {
@@ -206,20 +192,20 @@ func TestPublishedSuggestionCannotBeReplacedUnderSameID(t *testing.T) {
 	}
 }
 
-func TestConfirmationReturnsRuleArchiveFailure(t *testing.T) {
-	m, api, dir := confirmationManager(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+func TestConfirmationReturnsIndependentArchiveOutcome(t *testing.T) {
+	m, api, dir := confirmationManager(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{}`)) })
 	if err := os.Mkdir(filepath.Join(dir, "rules", "rule-kitchen.md"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.ConfirmSuggestion(context.Background(), "rule-kitchen"); err == nil {
-		t.Fatal("rule document failure reported as success")
+	s, err := api.ConfirmSuggestion(context.Background(), "rule-kitchen")
+	if err != nil || s.Status != "confirmed" {
+		t.Fatalf("verified install hidden: %+v %v", s, err)
 	}
-	stored, err := m.store.GetSuggestions()
-	if err != nil || stored[0].Status == "confirmed" {
-		t.Fatalf("archive failure marked confirmed: %#v %v", stored, err)
+	op, err := m.GetInstallOperationForSuggestion(s.ID)
+	if err != nil || op.Archive.Status != "pending" || op.Archive.ErrorCode != "install_archive_pending" {
+		t.Fatalf("archive failure missing: %+v %v", op, err)
 	}
 }
-
 func TestUnsupportedAutomationNeverReachesHA(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -319,7 +305,8 @@ func TestAnalysisReturnsPersistedDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	end := time.Now()
+	// Match the HA UTC calendar so the fixture always contains seven completed days.
+	end := time.Now().UTC()
 	var history []HistoryEntry
 	for day := 1; day <= 7; day++ {
 		at := end.AddDate(0, 0, -day)

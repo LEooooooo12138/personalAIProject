@@ -120,7 +120,8 @@ func stableSuggestionID(s RuleSuggestion) string {
 }
 
 // ExecuteRule creates the validated automation in HA and reloads automations.
-// Manager owns the persistent suggestion transition and rule document.
+// Compatibility wrapper only. Manager records create, reload, observation and archive
+// independently through the durable installation operation; this return is not load proof.
 func ExecuteRule(ctx context.Context, client *HomeAssistantClient, suggestion RuleSuggestion) error {
 	automation, err := BuildAutomation(suggestion)
 	if err != nil {
@@ -156,7 +157,7 @@ trigger: %s
 action: %s
 confidence: %.2f
 data_source: %s
-status: active
+status: installed
 ---
 
 ## Discovered Pattern

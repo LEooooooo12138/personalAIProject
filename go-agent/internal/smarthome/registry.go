@@ -23,6 +23,8 @@ type RegistryDevice struct {
 	Labels     []string `json:"labels"`
 }
 type RegistryEntity struct {
+	Platform     *string  `json:"platform"`
+	UniqueID     *string  `json:"unique_id"`
 	EntityID     string   `json:"entity_id"`
 	Name         *string  `json:"name"`
 	OriginalName *string  `json:"original_name"`
@@ -88,6 +90,14 @@ func (s *registrySession) request(typ string, fields map[string]any, out any) er
 		switch response.Error.Code {
 		case "unauthorized", "not_allowed":
 			return newHAError("ha_forbidden")
+		case "unknown_command", "not_supported":
+			return newHAError("ha_unsupported")
+		case "not_found":
+			return newHAError("ha_not_found")
+		case "invalid_format":
+			return registryProtocolError()
+		case "unknown_error", "home_assistant_error":
+			return newHAError("ha_unavailable")
 		case "auth_invalid":
 			return newHAError("ha_auth_required")
 		}

@@ -70,14 +70,14 @@ func TestLegacyConfirmationPreservesPayloadAndStateOnlyCompatibility(t *testing.
 	for _, kind := range []string{"time", "sun", "state"} {
 		t.Run(kind, func(t *testing.T) {
 			var reads, writes atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(installationProofHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet {
 					reads.Add(1)
 					if kind == "state" {
-						http.Error(w, "timezone offline", 503)
+						w.Write([]byte(`{"version":"2026.7.2","components":["automation","config"]}`))
 						return
 					}
-					w.Write([]byte(`{"time_zone":"Asia/Shanghai"}`))
+					w.Write([]byte(`{"time_zone":"Asia/Shanghai","version":"2026.7.2","components":["automation","config"]}`))
 					return
 				}
 				writes.Add(1)
@@ -133,12 +133,12 @@ func TestLegacyConfirmationPreservesPayloadAndStateOnlyCompatibility(t *testing.
 			if writes.Load() != 2 {
 				t.Errorf("writes=%d", writes.Load())
 			}
-			wantReads := int32(1)
+			wantReads := int32(3)
 			if kind == "state" {
-				wantReads = 0
+				wantReads = 2
 			}
 			if reads.Load() != wantReads {
-				t.Errorf("timezone reads=%d want=%d", reads.Load(), wantReads)
+				t.Errorf("profile/timezone reads=%d want=%d", reads.Load(), wantReads)
 			}
 		})
 	}

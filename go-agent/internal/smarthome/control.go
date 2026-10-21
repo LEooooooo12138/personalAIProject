@@ -77,7 +77,11 @@ func (s *ControlService) read(ctx context.Context, id, name string) (*DeviceQuer
 	if st == nil || st.EntityID != id || len(st.State) > 256 || strings.ContainsAny(st.State, "\x00\r\n") {
 		return nil, nil, ErrControlUnavailable
 	}
-	return &DeviceQueryResult{EntityID: id, Name: name, State: st.State, ObservedAt: s.now().UTC()}, st, nil
+	result := &DeviceQueryResult{EntityID: id, Name: name, State: st.State, ObservedAt: s.now().UTC(), Domain: strings.SplitN(id, ".", 2)[0], DeviceClass: safeDeviceClass(st.Attributes["device_class"])}
+	if unit, ok := st.Attributes["unit_of_measurement"].(string); ok {
+		result.Unit = &unit
+	}
+	return result, st, nil
 }
 func expectedControlState(action string) string {
 	if action == "turn_on" {

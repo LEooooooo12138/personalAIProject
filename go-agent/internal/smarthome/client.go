@@ -15,17 +15,19 @@ import (
 
 // HomeAssistantClient communicates with Home Assistant via its REST API.
 type HomeAssistantClient struct {
-	BaseURL       string
-	Token         string
-	httpClient    *http.Client
-	tokenProvider TokenProvider
+	BaseURL          string
+	Token            string
+	httpClient       *http.Client
+	tokenProvider    TokenProvider
+	observationReads chan struct{}
 }
 
 // NewHomeAssistantClient creates a new HA REST client.
 func NewHomeAssistantClient(baseURL, token string, timeout time.Duration) *HomeAssistantClient {
 	return &HomeAssistantClient{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Token:   token,
+		BaseURL:          strings.TrimRight(baseURL, "/"),
+		Token:            token,
+		observationReads: make(chan struct{}, 2),
 		httpClient: &http.Client{
 			Timeout:       timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -79,10 +81,13 @@ func (c *HomeAssistantClient) do(ctx context.Context, method, path string, body 
 			resp.Body.Close()
 			return nil, haStatusError(resp.StatusCode)
 		}
-		raw, e := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		raw, e := io.ReadAll(io.LimitReader(resp.Body, (32<<20)+1))
 		resp.Body.Close()
 		if e != nil {
 			return nil, safeHAError(e)
+		}
+		if len(raw) > 32<<20 {
+			return nil, newHAError("ha_response_too_large")
 		}
 		return raw, nil
 	}

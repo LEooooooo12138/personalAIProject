@@ -46,10 +46,13 @@ func DefaultControlConfig() ControlConfig {
 }
 
 type DeviceQueryResult struct {
-	EntityID   string    `json:"entity_id"`
-	Name       string    `json:"name"`
-	State      string    `json:"state"`
-	ObservedAt time.Time `json:"observed_at"`
+	EntityID    string    `json:"entity_id"`
+	Name        string    `json:"name"`
+	State       string    `json:"state"`
+	ObservedAt  time.Time `json:"observed_at"`
+	Domain      string    `json:"domain,omitempty"`
+	DeviceClass *string   `json:"device_class,omitempty"`
+	Unit        *string   `json:"unit,omitempty"`
 }
 type ControlProposal struct {
 	ID             string             `json:"id"`

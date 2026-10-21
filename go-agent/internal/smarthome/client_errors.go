@@ -27,7 +27,18 @@ func safeHAError(err error) error {
 	}
 	return newHAError(HAErrorCode(err))
 }
+
+type haHTTPStatusError struct {
+	status int
+	cause  error
+}
+
+func (e *haHTTPStatusError) Error() string { return e.cause.Error() }
+func (e *haHTTPStatusError) Unwrap() error { return e.cause }
 func haStatusError(status int) error {
+	return &haHTTPStatusError{status: status, cause: haStatusCause(status)}
+}
+func haStatusCause(status int) error {
 	switch status {
 	case 401:
 		return newHAError("ha_auth_required")

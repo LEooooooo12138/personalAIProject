@@ -15,20 +15,30 @@ import (
 var ErrAnalysisBusy = errors.New("analysis busy")
 
 type Manager struct {
-	analysisMu  sync.Mutex
-	cfg         HAConfig
-	client      *HomeAssistantClient
-	catalog     *CatalogService
-	store       *DeviceStore
-	collector   *Collector
-	analyzer    *Analyzer
-	logger      *zap.Logger
-	actionMu    sync.Mutex
-	lifecycleMu sync.Mutex
-	started     bool
-	stopped     bool
-	cancel      context.CancelFunc
-	workers     sync.WaitGroup
+	analysisMu     sync.Mutex
+	analysisRunsMu sync.Mutex
+	analysisRuns   map[string]AnalysisRun
+	analysisActive string
+	analysisCancel context.CancelFunc
+	cfg            HAConfig
+	client         *HomeAssistantClient
+	catalog        *CatalogService
+	store          *DeviceStore
+	collector      *Collector
+	analyzer       *Analyzer
+	logger         *zap.Logger
+	actionMu       sync.Mutex
+	lifecycleMu    sync.Mutex
+	started        bool
+	stopped        bool
+	cancel         context.CancelFunc
+	workers        sync.WaitGroup
+	serviceCtx     context.Context
+	stopParent     func() bool
+	backfillMu     sync.Mutex
+	backfillRuns   map[string]BackfillRun
+	backfillActive string
+	backfillCancel context.CancelFunc
 }
 
 // NewManager creates and initializes the smart home manager.
@@ -61,6 +71,19 @@ func NewManager(cfg HAConfig, logger *zap.Logger) (*Manager, error) {
 		return nil, fmt.Errorf("smarthome manager: %w", err)
 	}
 
+	if err := store.migrateManagementState(); err != nil {
+		client.Close()
+		return nil, err
+	}
+	if err := store.recoverInstallOperations(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("install state: %w", err)
+	}
+	if err := store.recoverManagementOperations(); err != nil {
+		client.Close()
+		return nil, err
+	}
+
 	m := &Manager{
 		cfg:      cfg,
 		client:   client,
@@ -69,6 +92,19 @@ func NewManager(cfg HAConfig, logger *zap.Logger) (*Manager, error) {
 		logger:   logger,
 	}
 
+	m.serviceCtx, m.cancel = context.WithCancel(context.Background())
+	m.backfillRuns, err = store.loadBackfillRuns()
+	if err != nil {
+		m.cancel()
+		client.Close()
+		return nil, fmt.Errorf("backfill state: %w", err)
+	}
+	m.analysisRuns, err = store.loadAnalysisRuns()
+	if err != nil {
+		m.cancel()
+		client.Close()
+		return nil, fmt.Errorf("analysis state: %w", err)
+	}
 	m.catalog = NewCatalogService(context.Background(), client)
 	m.collector = NewCollector(client, store, cfg.PollIntervalSec, logger)
 
@@ -82,7 +118,11 @@ func (m *Manager) Start(ctx context.Context) {
 	if m.started || m.stopped {
 		return
 	}
-	ctx, m.cancel = context.WithCancel(ctx)
+	m.stopParent = context.AfterFunc(ctx, m.cancel)
+	if ctx.Err() != nil {
+		m.cancel()
+	}
+	ctx = m.serviceCtx
 	m.started = true
 	context.AfterFunc(ctx, m.catalog.Close)
 	m.collector.Start(ctx)
@@ -104,6 +144,9 @@ func (m *Manager) Start(ctx context.Context) {
 func (m *Manager) Stop() {
 	m.lifecycleMu.Lock()
 	m.stopped = true
+	if m.stopParent != nil {
+		m.stopParent()
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -181,48 +224,30 @@ func (m *Manager) GetAnalyzer() *Analyzer {
 
 // TriggerAnalysis manually runs analysis and returns the report.
 func (m *Manager) TriggerAnalysis(ctx context.Context, lookbackDays int) (*DeviceReport, error) {
-	if !m.analysisMu.TryLock() {
-		return nil, ErrAnalysisBusy
-	}
-	defer m.analysisMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if lookbackDays < 1 || lookbackDays > 366 {
-		return nil, fmt.Errorf("lookback days must be between 1 and 366")
-	}
-	location, err := m.homeLocation(ctx)
+	run, err := m.StartAnalysis(JobScope{Context: ctx, OwnerID: "system"}, lookbackDays)
 	if err != nil {
 		return nil, err
 	}
-	report, err := m.analyzer.AnalyzeInLocation(time.Now(), lookbackDays, location)
-	if err != nil {
-		return nil, err
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, err := m.GetAnalysisRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		switch current.Status {
+		case "completed":
+			return current.Report, nil
+		case "failed":
+			return nil, errors.New(current.ErrorCode)
+		case "cancelled":
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, context.Canceled
+		}
+		<-ticker.C
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := m.store.SaveSuggestions(report.Suggestions); err != nil {
-		return nil, fmt.Errorf("save suggestions: %w", err)
-	}
-	stored, err := m.store.GetSuggestions()
-	if err != nil {
-		return nil, fmt.Errorf("read published suggestions: %w", err)
-	}
-	byID := make(map[string]RuleSuggestion, len(stored))
-	for _, suggestion := range stored {
-		byID[suggestion.ID] = suggestion
-	}
-	for i, suggestion := range report.Suggestions {
-		report.Suggestions[i] = byID[suggestion.ID]
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := m.store.SaveReport(*report); err != nil {
-		return nil, fmt.Errorf("save report: %w", err)
-	}
-	return report, nil
 }
 
 // nextAnalysisTime calculates the next occurrence of the specified hour.
@@ -237,3 +262,47 @@ func nextAnalysisTime(now time.Time, hour int, location *time.Location) time.Tim
 }
 
 func (m *Manager) Catalog(ctx context.Context) (CatalogSnapshot, error) { return m.catalog.Get(ctx) }
+
+// JobScope is an authorization lifetime supplied by the gateway, independent of
+// the completed HTTP request. Every Manager job consumes its scope exactly once.
+type JobScope struct {
+	Context context.Context
+	Release func()
+	OwnerID string
+}
+
+// acquireJob registers before Stop may Wait, merges service and authorization
+// cancellation, and returns an idempotent finish for accepted or rejected work.
+// A3 asynchronous analysis shares this lifecycle with backfill.
+func (m *Manager) acquireJob(scope JobScope) (context.Context, func(), error) {
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			if scope.Release != nil {
+				scope.Release()
+			}
+		})
+	}
+	if scope.Context == nil || scope.OwnerID == "" {
+		release()
+		return nil, nil, errors.New("invalid_job_scope")
+	}
+	m.lifecycleMu.Lock()
+	if m.stopped || m.serviceCtx.Err() != nil {
+		m.lifecycleMu.Unlock()
+		release()
+		return nil, nil, errors.New("manager_stopped")
+	}
+	if err := scope.Context.Err(); err != nil {
+		m.lifecycleMu.Unlock()
+		release()
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithCancel(scope.Context)
+	stop := context.AfterFunc(m.serviceCtx, cancel)
+	m.workers.Add(1)
+	m.lifecycleMu.Unlock()
+	var finished sync.Once
+	finish := func() { finished.Do(func() { stop(); cancel(); release(); m.workers.Done() }) }
+	return ctx, finish, nil
+}

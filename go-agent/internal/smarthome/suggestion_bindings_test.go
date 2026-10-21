@@ -41,10 +41,10 @@ func generatedManager(t *testing.T) (*Manager, *atomic.Int32, *atomic.Value) {
 	writes := &atomic.Int32{}
 	zone := &atomic.Value{}
 	zone.Store("Asia/Shanghai")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(installationProofHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/config":
-			json.NewEncoder(w).Encode(map[string]string{"time_zone": zone.Load().(string)})
+			json.NewEncoder(w).Encode(map[string]any{"time_zone": zone.Load().(string), "version": "2026.7.2", "components": []string{"automation", "config"}})
 		case r.URL.Path == "/api/states":
 			json.NewEncoder(w).Encode([]EntityState{{EntityID: "light.a", State: "on"}, {EntityID: "binary_sensor.house_occupied", State: "off"}, {EntityID: "group.household", State: "home"}, {EntityID: "binary_sensor.broken", State: "unavailable"}})
 		case r.Method == "POST":
@@ -279,10 +279,10 @@ func TestSummaryConflictBreaksDurationContinuity(t *testing.T) {
 
 func TestGeneratedCorrelationConfirmsAndArchives(t *testing.T) {
 	var creates atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(installationProofHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
-			fmt.Fprint(w, `{"time_zone":"UTC"}`)
+			fmt.Fprint(w, `{"time_zone":"UTC","version":"2026.7.2","components":["automation","config"]}`)
 		case "/api/states":
 			fmt.Fprint(w, `[{"entity_id":"light.a","state":"on"},{"entity_id":"switch.b","state":"off"}]`)
 		case "/api/services/automation/reload":

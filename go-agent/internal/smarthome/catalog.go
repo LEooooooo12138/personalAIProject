@@ -171,7 +171,7 @@ func deviceName(d RegistryDevice) string {
 	if d.Name != nil && *d.Name != "" {
 		return *d.Name
 	}
-	return d.ID
+	return "未命名设备"
 }
 func entityName(e RegistryEntity) string {
 	if e.Name != nil && *e.Name != "" {
@@ -180,7 +180,7 @@ func entityName(e RegistryEntity) string {
 	if e.OriginalName != nil && *e.OriginalName != "" {
 		return *e.OriginalName
 	}
-	return e.EntityID
+	return "未命名实体"
 }
 func buildCatalog(reg RegistrySnapshot, states []EntityState) (CatalogSnapshot, error) {
 	s := CatalogSnapshot{areas: map[string]AreaRef{}, devices: map[string]map[string]DeviceView{}}

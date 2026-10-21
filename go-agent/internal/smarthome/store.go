@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 )
@@ -122,12 +121,12 @@ func (s *DeviceStore) GetHistoryRange(entityID string, start, end time.Time) ([]
 			continue
 		}
 
-		var batch []HistoryEntry
-		if err := json.Unmarshal(data, &batch); err != nil {
+		batch, err := decodeHistoryFile(data)
+		if err != nil {
 			continue
 		}
 
-		for _, h := range batch {
+		for _, h := range batch.Entries {
 			if entityID != "" && h.EntityID != entityID {
 				continue
 			}
@@ -140,10 +139,6 @@ func (s *DeviceStore) GetHistoryRange(entityID string, start, end time.Time) ([]
 			all = append(all, h)
 		}
 	}
-
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].Timestamp.Before(all[j].Timestamp)
-	})
 
 	return deduplicateHistory(all), nil
 }

@@ -2,6 +2,7 @@ package smarthome
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -445,5 +446,63 @@ func TestControlConfigRejectsDuplicateAndMalformedTargets(t *testing.T) {
 		if _, e := NewControlService(cfg, cat, h, t.TempDir()); !errors.Is(e, ErrControlInvalid) {
 			t.Fatalf("config accepted %v", e)
 		}
+	}
+}
+
+func TestControlSafeStateMetadataProjection(t *testing.T) {
+	s, h, cat, _, _ := controlFixture(t)
+	cat.snap.devices["a"]["d"] = DeviceView{Entities: []EntityView{{EntityID: "binary_sensor.front", Name: "door", Domain: "binary_sensor"}}}
+	h.state.Attributes = map[string]any{"device_class": "door", "unit_of_measurement": "°C", "secret": "must-not-leak"}
+	result, err := s.Query(context.Background(), "binary_sensor.front")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(result)
+	var projection map[string]any
+	json.Unmarshal(data, &projection)
+	if projection["domain"] != "binary_sensor" || projection["device_class"] != "door" || projection["unit"] != "°C" || len(projection) != 7 {
+		t.Fatalf("unsafe/incomplete projection: %s", data)
+	}
+	h.state.Attributes["device_class"] = "unverified-secret-class"
+	h.state.Attributes["unit_of_measurement"] = 25
+	result, err = s.Query(context.Background(), "binary_sensor.front")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ = json.Marshal(result)
+	projection = nil
+	json.Unmarshal(data, &projection)
+	if _, exists := projection["device_class"]; exists {
+		t.Fatalf("unknown class leaked: %s", data)
+	}
+	if _, exists := projection["unit"]; exists {
+		t.Fatalf("non-string unit leaked: %s", data)
+	}
+	var legacy DeviceQueryResult
+	if err := json.Unmarshal([]byte(`{"entity_id":"sensor.old","name":"old","state":"on","observed_at":"2026-10-09T00:00:00Z"}`), &legacy); err != nil || legacy.State != "on" {
+		t.Fatalf("legacy JSON: %+v %v", legacy, err)
+	}
+	if h.writes != 0 {
+		t.Fatal("metadata query wrote HA")
+	}
+}
+func TestControlBeforeAfterMetadataPreservesExistingPolicy(t *testing.T) {
+	s, h, _, _, _ := controlFixture(t)
+	h.state.Attributes = map[string]any{"device_class": "light", "unit_of_measurement": "W", "secret": "must-not-leak"}
+	p := proposeControl(t, s, "metadata")
+	done, err := s.Confirm(controlAuth(), controlOwner, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []*DeviceQueryResult{p.Before, done.After} {
+		data, _ := json.Marshal(result)
+		var view map[string]any
+		json.Unmarshal(data, &view)
+		if view["domain"] != "light" || view["device_class"] != "light" || view["unit"] != "W" || len(view) != 7 {
+			t.Fatalf("metadata: %s", data)
+		}
+	}
+	if h.writes != 1 {
+		t.Fatal("extra service write")
 	}
 }

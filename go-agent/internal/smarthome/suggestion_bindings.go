@@ -75,6 +75,9 @@ func (m *Manager) BindSuggestion(ctx context.Context, id string, bindings Sugges
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := m.requireUnattemptedSuggestion(id); err != nil {
+		return nil, err
+	}
 	source, err := m.findSuggestion(id)
 	if err != nil {
 		return nil, err

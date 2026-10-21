@@ -2,13 +2,13 @@ package smarthome
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 )
 
 // ConfirmSuggestion executes exactly the persisted rule the user confirmed.
 // Serializing the transition prevents concurrent confirmations from duplicating HA requests.
-// A stable config_key makes an explicit retry after an uncertain response an upsert.
+// A durable operation prevents replay even when the external outcome is unknown.
 func (m *Manager) ConfirmSuggestion(ctx context.Context, id string) (*RuleSuggestion, error) {
 	m.actionMu.Lock()
 	defer m.actionMu.Unlock()
@@ -19,11 +19,19 @@ func (m *Manager) ConfirmSuggestion(ctx context.Context, id string) (*RuleSugges
 	if err != nil {
 		return nil, err
 	}
+	if op, lookupErr := m.GetInstallOperationForSuggestion(id); lookupErr == nil {
+		if err := m.store.projectInstallSuggestion(op); err != nil {
+			return nil, err
+		}
+		return m.findSuggestion(id)
+	} else if !errors.Is(lookupErr, ErrInstallOperationNotFound) {
+		return nil, lookupErr
+	}
 	switch suggestion.Status {
 	case "confirmed":
 		return suggestion, nil
-	case "pending", "failed", "applying":
-		// "applying" may remain after a process interruption; reuse its config_key.
+	case "pending":
+		// Only an unattempted pending suggestion may start an operation.
 	default:
 		return nil, fmt.Errorf("%w: cannot confirm %s suggestion", ErrSuggestionConflict, suggestion.Status)
 	}
@@ -51,28 +59,7 @@ func (m *Manager) ConfirmSuggestion(ctx context.Context, id string) (*RuleSugges
 			}
 		}
 	}
-	if _, err := m.store.changeSuggestion(id, "applying", id, ""); err != nil {
-		return nil, err
-	}
-	suggestion.HAAutomationID = id
-	if err := ExecuteRule(ctx, m.client, *suggestion); err != nil {
-		return nil, m.recordConfirmationFailure(id, err)
-	}
-	if err := atomicWrite(filepath.Join(m.store.basePath, "rules", id+".md"), []byte(RuleDocument(*suggestion))); err != nil {
-		return nil, m.recordConfirmationFailure(id, fmt.Errorf("archive rule: %w", err))
-	}
-	confirmed, err := m.store.changeSuggestion(id, "confirmed", id, "")
-	if err != nil {
-		return nil, fmt.Errorf("persist confirmed rule: %w", err)
-	}
-	return confirmed, nil
-}
-
-func (m *Manager) recordConfirmationFailure(id string, cause error) error {
-	if _, err := m.store.changeSuggestion(id, "failed", id, cause.Error()); err != nil {
-		return fmt.Errorf("%w; persist failure: %w", cause, err)
-	}
-	return cause
+	return m.applyInstallation(ctx, suggestion, automation)
 }
 
 // IgnoreSuggestion only affects an unexecuted suggestion; it never disables an HA rule.
@@ -91,6 +78,11 @@ func (m *Manager) IgnoreSuggestionContext(ctx context.Context, id string) (*Rule
 	suggestion, err := m.findSuggestion(id)
 	if err != nil {
 		return nil, err
+	}
+	if _, lookupErr := m.GetInstallOperationForSuggestion(id); lookupErr == nil {
+		return nil, fmt.Errorf("%w: installation already recorded", ErrSuggestionConflict)
+	} else if !errors.Is(lookupErr, ErrInstallOperationNotFound) {
+		return nil, lookupErr
 	}
 	if suggestion.Status == "ignored" {
 		return suggestion, nil

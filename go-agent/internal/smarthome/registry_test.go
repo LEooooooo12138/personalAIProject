@@ -272,3 +272,51 @@ func TestRegistryRejectsMissingRequiredIDs(t *testing.T) {
 		t.Fatalf("accepted missing IDs: %v", e)
 	}
 }
+
+func TestRegistryBoundsGreetingAndResult(t *testing.T) {
+	for _, greeting := range []bool{true, false} {
+		t.Run(map[bool]string{true: "greeting", false: "result"}[greeting], func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, e := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+				if e != nil {
+					return
+				}
+				defer conn.Close()
+				if greeting {
+					conn.WriteJSON(map[string]any{"type": "auth_required", "private": strings.Repeat("x", (4<<20)+1)})
+					return
+				}
+				conn.WriteJSON(map[string]any{"type": "auth_required"})
+				var auth any
+				if conn.ReadJSON(&auth) != nil {
+					return
+				}
+				conn.WriteJSON(map[string]any{"type": "auth_ok"})
+				var req map[string]any
+				if conn.ReadJSON(&req) != nil {
+					return
+				}
+				conn.WriteJSON(map[string]any{"id": req["id"], "type": "result", "success": true, "result": []any{map[string]any{"entity_id": "automation.rule", "name": strings.Repeat("x", (4<<20)+1)}}})
+			}))
+			defer s.Close()
+			_, err := NewHomeAssistantClient(s.URL, "fixture-secret", time.Second).readAutomationRegistry(context.Background())
+			if err == nil {
+				t.Fatal("oversized websocket message accepted")
+			}
+		})
+	}
+}
+func TestRegistryAutomationIdentityRetainsOptionalFields(t *testing.T) {
+	s := registryServer(t, func(req map[string]any) any {
+		if req["type"] != "config/entity_registry/list" {
+			t.Fatal("optional lists must not gate automation mapping")
+		}
+		return map[string]any{"id": req["id"], "type": "result", "success": true, "result": []any{
+			map[string]any{"entity_id": "automation.one", "platform": "automation", "unique_id": "config-key"}, map[string]any{"entity_id": "automation.two", "name": "config-key"},
+		}}
+	})
+	entries, err := NewHomeAssistantClient(s.URL, "fixture-secret", time.Second).readAutomationRegistry(context.Background())
+	if err != nil || len(entries) != 2 || entries[0].Platform == nil || *entries[0].Platform != "automation" || entries[0].UniqueID == nil || *entries[0].UniqueID != "config-key" || entries[1].Platform != nil || entries[1].UniqueID != nil {
+		t.Fatalf("%+v %v", entries, err)
+	}
+}

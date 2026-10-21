@@ -145,6 +145,8 @@ func (c *HomeAssistantClient) openAuthenticatedWS(ctx context.Context) (*websock
 			}
 			return nil, func() {}, safeHAError(e)
 		}
+		// Bound handshake and subsequent messages before any JSON decoding.
+		conn.SetReadLimit(4 << 20)
 		stop := context.AfterFunc(ctx, func() { conn.Close() })
 		cleanup := func() { stop(); conn.Close() }
 		deadline := time.Now().Add(10 * time.Second)

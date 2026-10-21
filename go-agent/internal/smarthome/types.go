@@ -127,34 +127,41 @@ type SuggestionIntent struct {
 	RequiredConditions []string `json:"required_conditions"`
 }
 type RuleSuggestion struct {
-	Intent             *SuggestionIntent `json:"intent,omitempty"`
-	PresenceBinding    *PresenceBinding  `json:"presence_binding,omitempty"`
-	SourceSuggestionID string            `json:"source_suggestion_id,omitempty"`
-	SupersededBy       string            `json:"superseded_by,omitempty"`
-	MissingBindings    []string          `json:"missing_bindings,omitempty"`
-	UnsupportedReason  string            `json:"unsupported_reason,omitempty"`
-	ID                 string            `json:"id"`
-	Title              string            `json:"title"`
-	Description        string            `json:"description"`
-	Trigger            string            `json:"trigger"`
-	Condition          string            `json:"condition"`
-	Action             string            `json:"action"`
-	Confidence         float64           `json:"confidence"`
-	DataSource         string            `json:"data_source"` // e.g. "14-day history, 93% hit rate"
-	CreatedAt          time.Time         `json:"created_at"`
-	Status             string            `json:"status"` // pending, applying, confirmed, failed, ignored
-	Automation         *AutomationConfig `json:"automation,omitempty"`
-	HAAutomationID     string            `json:"ha_automation_id,omitempty"`
-	LastError          string            `json:"last_error,omitempty"`
+	SchemaVersion      int                        `json:"schema_version,omitempty"`
+	RevisionDiff       []SuggestionRevisionChange `json:"revision_diff,omitempty"`
+	Evidence           []SuggestionEvidence       `json:"evidence,omitempty"`
+	Intent             *SuggestionIntent          `json:"intent,omitempty"`
+	PresenceBinding    *PresenceBinding           `json:"presence_binding,omitempty"`
+	SourceSuggestionID string                     `json:"source_suggestion_id,omitempty"`
+	SupersededBy       string                     `json:"superseded_by,omitempty"`
+	MissingBindings    []string                   `json:"missing_bindings,omitempty"`
+	UnsupportedReason  string                     `json:"unsupported_reason,omitempty"`
+	ID                 string                     `json:"id"`
+	Title              string                     `json:"title"`
+	Description        string                     `json:"description"`
+	Trigger            string                     `json:"trigger"`
+	Condition          string                     `json:"condition"`
+	Action             string                     `json:"action"`
+	Confidence         float64                    `json:"confidence"`
+	DataSource         string                     `json:"data_source"` // e.g. "14-day history, 93% hit rate"
+	CreatedAt          time.Time                  `json:"created_at"`
+	Status             string                     `json:"status"` // pending, applying, confirmed, failed, ignored
+	Automation         *AutomationConfig          `json:"automation,omitempty"`
+	HAAutomationID     string                     `json:"ha_automation_id,omitempty"`
+	LastError          string                     `json:"last_error,omitempty"`
 }
 
 // DeviceReport is a periodic analysis report for smart home data.
 type DeviceReport struct {
-	PeriodStart time.Time         `json:"period_start"`
-	PeriodEnd   time.Time         `json:"period_end"`
-	Devices     []DeviceSummary   `json:"devices"`
-	Patterns    []DetectedPattern `json:"patterns"`
-	Suggestions []RuleSuggestion  `json:"suggestions"`
+	Outcome     string                    `json:"outcome"`
+	Outcomes    map[string]PatternOutcome `json:"outcomes"`
+	Coverage    HistoryCoverage           `json:"coverage"`
+	Counts      AnalysisCounts            `json:"counts"`
+	PeriodStart time.Time                 `json:"period_start"`
+	PeriodEnd   time.Time                 `json:"period_end"`
+	Devices     []DeviceSummary           `json:"devices"`
+	Patterns    []DetectedPattern         `json:"patterns"`
+	Suggestions []RuleSuggestion          `json:"suggestions"`
 }
 
 // DeviceSummary aggregates data for a single device over a period.
@@ -172,14 +179,20 @@ type DeviceSummary struct {
 
 // DetectedPattern represents a usage pattern found by the analysis engine.
 type DetectedPattern struct {
-	Type        string  `json:"type"` // time, correlation, anomaly, energy
-	EntityID    string  `json:"entity_id"`
-	RelatedID   string  `json:"related_id,omitempty"`
-	Description string  `json:"description"`
-	Confidence  float64 `json:"confidence"`
-	SampleSize  int     `json:"sample_size"`
-	PeriodDays  int     `json:"period_days"`
-	TimeOfDay   string  `json:"time_of_day,omitempty"`
+	ExcludedCounts  map[string]int        `json:"excluded_counts,omitempty"`
+	HitDays         *int                  `json:"hit_days,omitempty"`
+	EligibleDays    *int                  `json:"eligible_days,omitempty"`
+	Denominator     int                   `json:"denominator"`
+	DenominatorType string                `json:"denominator_type"`
+	EventRefs       []LocalEventReference `json:"event_refs,omitempty"`
+	Type            string                `json:"type"` // time, correlation, anomaly, energy
+	EntityID        string                `json:"entity_id"`
+	RelatedID       string                `json:"related_id,omitempty"`
+	Description     string                `json:"description"`
+	Confidence      float64               `json:"confidence"`
+	SampleSize      int                   `json:"sample_size"`
+	PeriodDays      int                   `json:"period_days"`
+	TimeOfDay       string                `json:"time_of_day,omitempty"`
 }
 
 // HAConfig holds the Home Assistant connection configuration.
